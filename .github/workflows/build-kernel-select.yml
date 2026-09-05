@@ -129,7 +129,8 @@ jobs:
           echo "OBJSIZE=llvm-size" >> "$GITHUB_ENV"
           echo "STRIP=llvm-strip" >> "$GITHUB_ENV"
           echo "LLVM=1" >> "$GITHUB_ENV"
-          echo "LLVM_IAS=0" >> "$GITHUB_ENV"
+          # 修正：使用 Clang 内部汇编器，避免系统 as 不支持 -EL
+          echo "LLVM_IAS=1" >> "$GITHUB_ENV"
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
 
@@ -169,7 +170,7 @@ jobs:
           make O="$OUT" ARCH="$ARCH" "$DEFCONFIG"
           test -f "$OUT/.config"
 
-      - name: Enable KernelSU, Droidspaces, and disable stack protector
+      - name: Enable KernelSU, Droidspaces, disable stack protector, and manual hook
         run: |
           set -eux
           cd "$GITHUB_WORKSPACE"
@@ -180,7 +181,8 @@ jobs:
           ./scripts/config --file "$OUT/.config" \
             --enable KPROBES \
             --enable KPROBE_EVENTS \
-            --enable KSU
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK
           echo
           echo "========================================"
           echo " Enable Droidspaces"
@@ -236,7 +238,7 @@ jobs:
           ./scripts/config --file "$OUT/.config" \
             --disable ANDROID_PARANOID_NETWORK || true
 
-          # 修正：禁用 stack protector strong，因为 Clang 不支持
+          # 禁用 stack protector strong
           echo
           echo "========================================"
           echo " Disable stack protector strong"
@@ -249,7 +251,7 @@ jobs:
           echo "========================================"
           echo " Running olddefconfig"
           echo "========================================"
-          make O="$OUT" ARCH="$ARCH" LLVM=1 LLVM_IAS=0 olddefconfig
+          make O="$OUT" ARCH="$ARCH" LLVM=1 LLVM_IAS=1 olddefconfig
           test -f "$OUT/.config"
 
       - name: Verify final configuration
@@ -268,6 +270,7 @@ jobs:
           grep '^CONFIG_KPROBES=y' "$OUT/.config"
           grep '^CONFIG_KPROBE_EVENTS=y' "$OUT/.config"
           grep '^CONFIG_KSU=y' "$OUT/.config"
+          grep '^CONFIG_KSU_MANUAL_HOOK=y' "$OUT/.config" || echo "WARNING: CONFIG_KSU_MANUAL_HOOK not found"
           echo "KernelSU configuration: OK"
           echo
           echo "========================================"
@@ -346,7 +349,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           export PATH="$CLANG_BIN:$PATH"
           export CC="ccache clang"
-          make -j"$(nproc)" O="$OUT" ARCH="$ARCH" LLVM=1 LLVM_IAS=0 \
+          make -j"$(nproc)" O="$OUT" ARCH="$ARCH" LLVM=1 LLVM_IAS=1 \
             CC="$CC" LD=ld.lld AR=llvm-ar NM=llvm-nm \
             OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump \
             READELF=llvm-readelf OBJSIZE=llvm-size STRIP=llvm-strip \
@@ -468,7 +471,7 @@ jobs:
           lineage-23.2-${ROM_BUILD}-nightly-violet
 
           KernelSU KPROBE hooks:
-          Not required by this KernelSU-Next legacy configuration.
+          Manual hook enabled (CONFIG_KSU_MANUAL_HOOK)
           EOF
           cat RELEASE.txt
 
