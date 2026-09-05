@@ -1,10 +1,9 @@
-name: Violet Droidspaces KernelSU-Next
+name: Violet Kernel Build
 
 on:
   push:
     branches:
-      - lineage-23.2
-
+      - "**"
   workflow_dispatch:
 
 permissions:
@@ -12,13 +11,11 @@ permissions:
 
 jobs:
   build:
-    name: Redmi Note 7 Pro Violet Kernel
     runs-on: ubuntu-22.04
 
     env:
       ARCH: arm64
       SUBARCH: arm64
-
       DEFCONFIG: vendor/sdmsteppe-perf_defconfig
       OUT: ${{ github.workspace }}/out
 
@@ -31,23 +28,14 @@ jobs:
 
     steps:
 
-      # ============================================================
-      # SOURCE
-      # ============================================================
-
-      - name: Checkout kernel
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # ============================================================
-      # DEPENDENCIES
-      # ============================================================
-
       - name: Install dependencies
         run: |
           sudo apt-get update
-
           sudo apt-get install -y \
             bc \
             bison \
@@ -67,180 +55,136 @@ jobs:
             gcc-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu
 
-      # ============================================================
-      # CLANG
-      # ============================================================
-
       - name: Setup Android Clang
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/clang"
 
           git clone \
             --depth=1 \
-            --branch android12-release \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
             "$RUNNER_TEMP/clang"
 
-          test -x \
-            "$RUNNER_TEMP/clang/clang-r383902/bin/clang"
+          if [ ! -x "$RUNNER_TEMP/clang/clang-r383902/bin/clang" ]; then
+            echo "ERROR: clang-r383902 not found"
+            find "$RUNNER_TEMP/clang" -maxdepth 3 -name clang -type f
+            exit 1
+          fi
 
-          echo \
-            "$RUNNER_TEMP/clang/clang-r383902/bin" \
-            >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/clang/clang-r383902/bin" >> "$GITHUB_PATH"
 
-          clang --version
-
-      # ============================================================
-      # CROSS COMPILER
-      # ============================================================
+          "$RUNNER_TEMP/clang/clang-r383902/bin/clang" --version
 
       - name: Setup cross compiler
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/cross"
 
-          ln -sf \
-            "$(command -v aarch64-linux-gnu-ld)" \
-            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-ld"
+          PREFIX="$RUNNER_TEMP/cross/aarch64-linux-androidkernel-"
 
-          ln -sf \
-            "$(command -v aarch64-linux-gnu-as)" \
-            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-as"
+          ln -sf "$(command -v aarch64-linux-gnu-ld)" \
+            "${PREFIX}ld"
 
-          ln -sf \
-            "$(command -v aarch64-linux-gnu-objcopy)" \
-            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-objcopy"
+          ln -sf "$(command -v aarch64-linux-gnu-as)" \
+            "${PREFIX}as"
 
-          ln -sf \
-            "$(command -v aarch64-linux-gnu-objdump)" \
-            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-objdump"
+          ln -sf "$(command -v aarch64-linux-gnu-objcopy)" \
+            "${PREFIX}objcopy"
 
-          ln -sf \
-            "$(command -v aarch64-linux-gnu-nm)" \
-            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-nm"
+          ln -sf "$(command -v aarch64-linux-gnu-objdump)" \
+            "${PREFIX}objdump"
 
-          ln -sf \
-            "$(command -v aarch64-linux-gnu-strip)" \
-            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-strip"
+          ln -sf "$(command -v aarch64-linux-gnu-nm)" \
+            "${PREFIX}nm"
+
+          ln -sf "$(command -v aarch64-linux-gnu-strip)" \
+            "${PREFIX}strip"
 
           echo "$RUNNER_TEMP/cross" >> "$GITHUB_PATH"
 
-      # ============================================================
-      # BUILD ENVIRONMENT
-      # ============================================================
-
       - name: Configure toolchain
         run: |
-          echo "CC=clang" >> "$GITHUB_ENV"
-          echo "LD=ld.lld" >> "$GITHUB_ENV"
-          echo "AR=llvm-ar" >> "$GITHUB_ENV"
-          echo "NM=llvm-nm" >> "$GITHUB_ENV"
-          echo "OBJCOPY=llvm-objcopy" >> "$GITHUB_ENV"
-          echo "OBJDUMP=llvm-objdump" >> "$GITHUB_ENV"
-          echo "READELF=llvm-readelf" >> "$GITHUB_ENV"
-          echo "OBJSIZE=llvm-size" >> "$GITHUB_ENV"
-          echo "STRIP=llvm-strip" >> "$GITHUB_ENV"
+          cat >> "$GITHUB_ENV" <<EOF
+          CC=clang
+          LD=ld.lld
+          AR=llvm-ar
+          NM=llvm-nm
+          OBJCOPY=llvm-objcopy
+          OBJDUMP=llvm-objdump
+          READELF=llvm-readelf
+          OBJSIZE=llvm-size
+          STRIP=llvm-strip
+          CROSS_COMPILE=$RUNNER_TEMP/cross/aarch64-linux-androidkernel-
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          LLVM=1
+          LLVM_IAS=0
+          EOF
 
-          echo \
-            "CROSS_COMPILE=$RUNNER_TEMP/cross/aarch64-linux-androidkernel-" \
-            >> "$GITHUB_ENV"
-
-          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
-
-          echo "LLVM=1" >> "$GITHUB_ENV"
-
-          # Linux 4.14:
-          # disable LLVM integrated assembler
-          echo "LLVM_IAS=0" >> "$GITHUB_ENV"
-
-      # ============================================================
-      # KERNELSU-NEXT
-      #
-      # IMPORTANT:
-      # Run official setup.sh from kernel source root.
-      # Use legacy explicitly.
-      # ============================================================
-
-      - name: Add KernelSU-Next Legacy
+      - name: Verify source
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE"
 
           test -d drivers
           test -f Makefile
           test -f Kconfig
 
-          echo "========================================"
-          echo " Installing KernelSU-Next LEGACY"
-          echo "========================================"
+          echo "Kernel source OK"
+          echo "Commit: $(git rev-parse HEAD)"
 
-          curl -LSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            | bash -s legacy
+      # ------------------------------------------------------------
+      # KernelSU-Next
+      # ------------------------------------------------------------
 
-          echo
-          echo "========================================"
-          echo " KernelSU-Next installation result"
-          echo "========================================"
-
-          test -d "$GITHUB_WORKSPACE/KernelSU-Next"
-
-          test -L \
-            "$GITHUB_WORKSPACE/drivers/kernelsu"
-
-          echo
-          echo "KernelSU-Next:"
-          ls -lah "$GITHUB_WORKSPACE/KernelSU-Next"
-
-          echo
-          echo "drivers/kernelsu:"
-          ls -lah "$GITHUB_WORKSPACE/drivers/kernelsu"
-
-          echo
-          echo "KernelSU Kconfig:"
-          grep -n "KSU" \
-            "$GITHUB_WORKSPACE/drivers/kernelsu/Kconfig" \
-            | head -20 || true
-
-      # ============================================================
-      # VERIFY KERNELSU SOURCE
-      # ============================================================
-
-      - name: Verify KernelSU-Next
+      - name: Install KernelSU-Next
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE"
 
           echo "========================================"
           echo " KernelSU-Next"
           echo "========================================"
 
+          rm -rf KernelSU-Next
+
+          git clone \
+            --depth=1 \
+            --branch next \
+            https://github.com/KernelSU-Next/KernelSU-Next.git \
+            KernelSU-Next
+
+          cd KernelSU-Next
+
+          bash kernel/setup.sh "$GITHUB_WORKSPACE"
+
+          cd "$GITHUB_WORKSPACE"
+
           test -d KernelSU-Next
-          test -L drivers/kernelsu
 
           echo
-          echo "KernelSU-Next commit:"
+          echo "KernelSU-Next installed."
 
-          git -C KernelSU-Next rev-parse --short HEAD
+          if [ -L drivers/kernelsu ]; then
+            echo "drivers/kernelsu symlink OK"
+          elif [ -d drivers/kernelsu ]; then
+            echo "drivers/kernelsu directory OK"
+          else
+            echo "ERROR: drivers/kernelsu not found"
+            exit 1
+          fi
 
-          echo
-          echo "KernelSU-Next tag/branch:"
-
-          git -C KernelSU-Next describe --tags --always || true
-
-          echo
-          echo "drivers/kernelsu ->"
-
-          readlink -f drivers/kernelsu
-
-          echo
-          echo "========================================"
-          echo " KernelSU source check PASSED"
-          echo "========================================"
-
-      # ============================================================
-      # DEFCONFIG
-      # ============================================================
+      # ------------------------------------------------------------
+      # Defconfig
+      # ------------------------------------------------------------
 
       - name: Generate defconfig
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE"
 
           rm -rf "$OUT"
@@ -265,74 +209,43 @@ jobs:
 
           test -f "$OUT/.config"
 
-      # ============================================================
-      # KERNELSU CONFIG
-      #
-      # Non-GKI 4.14:
-      # kprobe based hooks are recommended by KernelSU-Next.
-      # ============================================================
+      # ------------------------------------------------------------
+      # KernelSU + Droidspaces configuration
+      # ------------------------------------------------------------
 
-      - name: Enable KernelSU configuration
+      - name: Configure kernel
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE"
+
+          echo "========================================"
+          echo " KernelSU"
+          echo "========================================"
 
           ./scripts/config \
             --file "$OUT/.config" \
             --enable KPROBES \
             --enable KPROBE_EVENTS \
-            --enable KSU_KPROBE_HOOKS \
             --enable KSU
 
-          make \
-            O="$OUT" \
-            ARCH="$ARCH" \
-            CC="$CC" \
-            LD="$LD" \
-            AR="$AR" \
-            NM="$NM" \
-            OBJCOPY="$OBJCOPY" \
-            OBJDUMP="$OBJDUMP" \
-            READELF="$READELF" \
-            OBJSIZE="$OBJSIZE" \
-            STRIP="$STRIP" \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CLANG_TRIPLE="$CLANG_TRIPLE" \
-            LLVM="$LLVM" \
-            LLVM_IAS="$LLVM_IAS" \
-            olddefconfig
-
-          echo
-          echo "========== KernelSU config =========="
-
-          grep -E \
-            '^CONFIG_(KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|KSU)=' \
-            "$OUT/.config"
-
-      # ============================================================
-      # DROIDSPACES
-      # ============================================================
-
-      - name: Configure Droidspaces
-        run: |
-          cd "$GITHUB_WORKSPACE"
+          echo "========================================"
+          echo " Droidspaces"
+          echo "========================================"
 
           ./scripts/config \
             --file "$OUT/.config" \
-            \
             --enable SYSCTL \
             --enable SYSVIPC \
             --enable POSIX_MQUEUE \
-            \
             --enable NAMESPACES \
             --enable PID_NS \
             --enable UTS_NS \
             --enable IPC_NS \
             --enable NET_NS \
             --enable USER_NS \
-            \
             --enable SECCOMP \
             --enable SECCOMP_FILTER \
-            \
             --enable CGROUPS \
             --enable CGROUP_DEVICE \
             --enable CGROUP_PIDS \
@@ -341,72 +254,44 @@ jobs:
             --enable FAIR_GROUP_SCHED \
             --enable CGROUP_FREEZER \
             --enable CGROUP_NET_PRIO \
-            \
             --enable DEVTMPFS \
-            \
             --enable OVERLAY_FS \
-            \
             --enable TMPFS_POSIX_ACL \
             --enable TMPFS_XATTR \
-            \
             --enable FW_LOADER \
             --enable FW_LOADER_USER_HELPER \
-            --enable FW_LOADER_COMPRESS \
-            \
             --enable VETH \
             --enable BRIDGE \
             --enable BRIDGE_NETFILTER \
-            \
             --enable NETFILTER \
             --enable NETFILTER_ADVANCED \
-            \
             --enable NF_CONNTRACK \
             --enable NF_CONNTRACK_IPV4 \
-            \
             --enable NF_NAT \
             --enable NF_NAT_IPV4 \
-            \
             --enable IP_NF_IPTABLES \
             --enable IP_NF_FILTER \
             --enable IP_NF_NAT \
-            \
             --enable IP_NF_TARGET_MASQUERADE \
-            --enable NETFILTER_XT_TARGET_MASQUERADE \
             --enable NETFILTER_XT_TARGET_TCPMSS \
             --enable NETFILTER_XT_MATCH_ADDRTYPE \
-            \
-            --enable NF_CONNTRACK_NETLINK \
             --enable NF_NAT_REDIRECT \
-            \
             --enable IP_ADVANCED_ROUTER \
             --enable IP_MULTIPLE_TABLES
 
           make \
             O="$OUT" \
             ARCH="$ARCH" \
-            CC="$CC" \
-            LD="$LD" \
-            AR="$AR" \
-            NM="$NM" \
-            OBJCOPY="$OBJCOPY" \
-            OBJDUMP="$OBJDUMP" \
-            READELF="$READELF" \
-            OBJSIZE="$OBJSIZE" \
-            STRIP="$STRIP" \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CLANG_TRIPLE="$CLANG_TRIPLE" \
-            LLVM="$LLVM" \
-            LLVM_IAS="$LLVM_IAS" \
             olddefconfig
 
-      # ============================================================
-      # VERIFY CONFIG
-      #
-      # This happens BEFORE the long kernel build.
-      # ============================================================
+      # ------------------------------------------------------------
+      # Verify configuration
+      # ------------------------------------------------------------
 
       - name: Verify configuration
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE"
 
           echo "========================================"
@@ -423,21 +308,16 @@ jobs:
           echo " KernelSU"
           echo "========================================"
 
-          REQUIRED_KSU="
-          KPROBES
-          KPROBE_EVENTS
-          KSU_KPROBE_HOOKS
-          KSU
-          "
-
-          FAILED=0
-
-          for CONFIG in $REQUIRED_KSU; do
+          for CONFIG in \
+            KPROBES \
+            KPROBE_EVENTS \
+            KSU
+          do
             if grep -q "^CONFIG_${CONFIG}=y" "$OUT/.config"; then
               echo "OK   CONFIG_${CONFIG}=y"
             else
               echo "MISS CONFIG_${CONFIG}"
-              FAILED=1
+              exit 1
             fi
           done
 
@@ -472,7 +352,6 @@ jobs:
           TMPFS_XATTR
           FW_LOADER
           FW_LOADER_USER_HELPER
-          FW_LOADER_COMPRESS
           VETH
           BRIDGE
           BRIDGE_NETFILTER
@@ -486,10 +365,8 @@ jobs:
           IP_NF_FILTER
           IP_NF_NAT
           IP_NF_TARGET_MASQUERADE
-          NETFILTER_XT_TARGET_MASQUERADE
           NETFILTER_XT_TARGET_TCPMSS
           NETFILTER_XT_MATCH_ADDRTYPE
-          NF_CONNTRACK_NETLINK
           NF_NAT_REDIRECT
           IP_ADVANCED_ROUTER
           IP_MULTIPLE_TABLES
@@ -500,32 +377,27 @@ jobs:
               echo "OK   CONFIG_${CONFIG}=y"
             else
               echo "MISS CONFIG_${CONFIG}"
-              FAILED=1
+              exit 1
             fi
           done
 
           echo
           echo "========================================"
-          echo " Result"
+          echo " Configuration OK"
           echo "========================================"
 
-          if [ "$FAILED" -ne 0 ]; then
-            echo "ERROR: Configuration check FAILED."
-            exit 1
-          fi
-
-          echo "ALL CONFIGURATION CHECKS PASSED."
-
-      # ============================================================
-      # BUILD
-      # ============================================================
+      # ------------------------------------------------------------
+      # Build
+      # ------------------------------------------------------------
 
       - name: Build kernel
         run: |
+          set -e
+
           cd "$GITHUB_WORKSPACE"
 
           echo "========================================"
-          echo " BUILDING"
+          echo " BUILD"
           echo "========================================"
 
           make -j"$(nproc)" \
@@ -548,55 +420,40 @@ jobs:
             dtbs \
             modules
 
-          test -f \
-            "$OUT/arch/arm64/boot/Image.gz"
+          test -f "$OUT/arch/arm64/boot/Image.gz"
 
           echo
           echo "BUILD SUCCESS"
 
-      # ============================================================
-      # DOWNLOAD STOCK BOOT
-      # ============================================================
+      # ------------------------------------------------------------
+      # Download boot image
+      # ------------------------------------------------------------
 
-      - name: Download stock boot
+      - name: Download boot image
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/stock"
 
-          curl -fL \
+          curl -fL --retry 5 \
             "$BOOT_URL" \
             -o "$RUNNER_TEMP/stock/boot.img"
 
-          curl -fL \
-            "$DTBO_URL" \
-            -o "$RUNNER_TEMP/stock/dtbo.img"
+          test -s "$RUNNER_TEMP/stock/boot.img"
 
-          curl -fL \
-            "$RECOVERY_URL" \
-            -o "$RUNNER_TEMP/stock/recovery.img"
+          ls -lh "$RUNNER_TEMP/stock/boot.img"
 
-          curl -fL \
-            "$SUPER_EMPTY_URL" \
-            -o "$RUNNER_TEMP/stock/super_empty.img"
+      # ------------------------------------------------------------
+      # Download Magisk boot tool
+      # ------------------------------------------------------------
 
-          curl -fL \
-            "$VBMETA_URL" \
-            -o "$RUNNER_TEMP/stock/vbmeta.img"
-
-          curl -fL \
-            "$MANIFEST_URL" \
-            -o "$RUNNER_TEMP/stock/build-manifest.xml"
-
-          ls -lh "$RUNNER_TEMP/stock"
-
-      # ============================================================
-      # MAGISKBOOT
-      # ============================================================
-
-      - name: Get magiskboot
+      - name: Download magiskboot
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/magisk"
 
-          curl -fL \
+          curl -fL --retry 5 \
             https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk \
             -o "$RUNNER_TEMP/magisk/Magisk.apk"
 
@@ -610,14 +467,18 @@ jobs:
             "$RUNNER_TEMP/magisk/magiskboot"
 
           chmod +x \
-            "$RUNNER_TEMP/magisk/magiskboot"
+            "$RUNNER_TEMP/magisk/magiskboot
 
-      # ============================================================
-      # REPACK BOOT
-      # ============================================================
+          test -x "$RUNNER_TEMP/magisk/magiskboot"
 
-      - name: Repack boot.img
+      # ------------------------------------------------------------
+      # Unpack boot
+      # ------------------------------------------------------------
+
+      - name: Unpack boot
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/boot"
 
           cp \
@@ -626,133 +487,136 @@ jobs:
 
           cd "$RUNNER_TEMP/boot"
 
-          echo "========== Unpack =========="
-
           "$RUNNER_TEMP/magisk/magiskboot" \
-            unpack stock-boot.img
+            unpack \
+            stock-boot.img
 
           test -f kernel
 
-          echo
-          echo "Original kernel:"
+          echo "Original boot kernel:"
           file kernel
-          ls -lh kernel
 
-          echo
-          echo "Compiled kernel:"
-          file "$OUT/arch/arm64/boot/Image.gz"
-          ls -lh "$OUT/arch/arm64/boot/Image.gz"
+      # ------------------------------------------------------------
+      # Replace kernel
+      # ------------------------------------------------------------
+
+      - name: Replace kernel
+        run: |
+          set -e
+
+          cd "$RUNNER_TEMP/boot"
 
           cp \
             "$OUT/arch/arm64/boot/Image.gz" \
             kernel
 
-          echo
-          echo "========== Repack =========="
+          echo "New boot kernel:"
+          file kernel
+
+      # ------------------------------------------------------------
+      # Repack boot
+      # ------------------------------------------------------------
+
+      - name: Repack boot
+        run: |
+          set -e
+
+          cd "$RUNNER_TEMP/boot"
 
           "$RUNNER_TEMP/magisk/magiskboot" \
             repack \
             stock-boot.img \
             violet-droidspaces-kernelsu.img
 
-          test -f \
-            violet-droidspaces-kernelsu.img
+          test -s violet-droidspaces-kernelsu.img
 
-          ls -lh \
-            violet-droidspaces-kernelsu.img
+          ls -lh violet-droidspaces-kernelsu.img
 
-      # ============================================================
-      # RELEASE FILES
-      # ============================================================
+      # ------------------------------------------------------------
+      # Prepare release
+      # ------------------------------------------------------------
 
       - name: Prepare release
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/release"
 
           cp \
             "$RUNNER_TEMP/boot/violet-droidspaces-kernelsu.img" \
-            "$RUNNER_TEMP/release/violet-droidspaces-kernelsu.img"
+            "$RUNNER_TEMP/release/"
 
           cp \
             "$OUT/arch/arm64/boot/Image.gz" \
-            "$RUNNER_TEMP/release/Image.gz"
-
-          cp \
-            "$RUNNER_TEMP/stock/dtbo.img" \
-            "$RUNNER_TEMP/release/dtbo-stock.img"
-
-          cp \
-            "$RUNNER_TEMP/stock/recovery.img" \
-            "$RUNNER_TEMP/release/recovery-stock.img"
-
-          cp \
-            "$RUNNER_TEMP/stock/super_empty.img" \
-            "$RUNNER_TEMP/release/super_empty-stock.img"
-
-          cp \
-            "$RUNNER_TEMP/stock/vbmeta.img" \
-            "$RUNNER_TEMP/release/vbmeta-stock.img"
-
-          cp \
-            "$RUNNER_TEMP/stock/build-manifest.xml" \
-            "$RUNNER_TEMP/release/build-manifest.xml"
+            "$RUNNER_TEMP/release/"
 
           cp \
             "$OUT/.config" \
             "$RUNNER_TEMP/release/kernel.config"
 
-          cat > \
-            "$RUNNER_TEMP/release/build-info.txt" <<EOF
-          Device: Xiaomi Redmi Note 7 Pro
+          cat > "$RUNNER_TEMP/release/build-info.txt" <<EOF
+          Device: Redmi Note 7 Pro
           Codename: violet
           ROM: LineageOS 23.2
           ROM Build: 20260826
-          Kernel: 4.14.357
-          Defconfig: vendor/sdmsteppe-perf_defconfig
-          KernelSU-Next: legacy
-          Droidspaces: enabled
+          Kernel: $(make -s O="$OUT" ARCH="$ARCH" kernelversion)
+          Defconfig: $DEFCONFIG
+          KernelSU: KernelSU-Next
+          KernelSU Mode: legacy
           SUSFS: disabled
+          Droidspaces: enabled
+          LLVM: clang-r383902
           LLVM_IAS: 0
+          Source commit: $(git rev-parse HEAD)
+          KernelSU commit: $(git -C KernelSU-Next rev-parse HEAD)
+          Actions run: $GITHUB_RUN_NUMBER
           EOF
 
           cd "$RUNNER_TEMP/release"
 
-          sha256sum * > sha256sum.txt
+          sha256sum \
+            violet-droidspaces-kernelsu.img \
+            Image.gz \
+            kernel.config \
+            build-info.txt \
+            > sha256sum.txt
+
+          echo
+          echo "========================================"
+          echo " RELEASE FILES"
+          echo "========================================"
 
           ls -lah
 
-      # ============================================================
-      # ARTIFACT
-      # ============================================================
+          echo
+          cat sha256sum.txt
+
+      # ------------------------------------------------------------
+      # Actions artifact
+      # ------------------------------------------------------------
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: violet-droidspaces-kernelsu
+          name: violet-droidspaces-kernelsu-${{ github.run_number }}
           path: ${{ runner.temp }}/release
           if-no-files-found: error
           retention-days: 30
 
-      # ============================================================
-      # GITHUB RELEASE
-      # ============================================================
+      # ------------------------------------------------------------
+      # GitHub Release
+      # ------------------------------------------------------------
 
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "droidspaces-${{ github.run_number }}"
-          name: "Redmi Note 7 Pro Droidspaces + KernelSU-Next ${{ github.run_number }}"
+          tag_name: droidspaces-${{ github.run_number }}
+          name: Redmi Note 7 Pro - Droidspaces + KernelSU-Next #${{ github.run_number }}
           prerelease: true
           generate_release_notes: true
-
           files: |
             ${{ runner.temp }}/release/violet-droidspaces-kernelsu.img
             ${{ runner.temp }}/release/Image.gz
-            ${{ runner.temp }}/release/dtbo-stock.img
-            ${{ runner.temp }}/release/recovery-stock.img
-            ${{ runner.temp }}/release/super_empty-stock.img
-            ${{ runner.temp }}/release/vbmeta-stock.img
-            ${{ runner.temp }}/release/build-manifest.xml
             ${{ runner.temp }}/release/kernel.config
             ${{ runner.temp }}/release/build-info.txt
             ${{ runner.temp }}/release/sha256sum.txt
