@@ -1,10 +1,10 @@
-name: Build Violet Kernel with KernelSU v0.9.5 + Droidspaces
+name: Build Violet Kernel with Droidspaces Support (Magisk Ready)
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - "**"
+  push:
+    branches:
+      - "**"
 
 permissions:
   contents: write
@@ -122,54 +122,54 @@ jobs:
           echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 集成官方 KernelSU v0.9.5
-      # ============================================================
-      - name: Integrate KernelSU v0.9.5
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
-          if [ ! -e KernelSU ]; then
-            ln -sf KernelSU-0.9.5 KernelSU
-          fi
-
-      # ============================================================
-      # 修复设备树编译错误（清空有问题的 coresight 文件）
+      # 修复设备树编译错误（批量处理）
       # ============================================================
       - name: Fix device tree compilation errors
         run: |
           cd "$GITHUB_WORKSPACE"
-          # 1. 修复 tpdm_west 引用（注释掉包含该字符串的行）
-          for file in arch/arm64/boot/dts/qcom/*.dtsi; do
-            if [ -f "$file" ] && grep -q tpdm_west "$file"; then
-              echo "Fixing $file for tpdm_west"
-              sed -i 's/^.*tpdm_west.*$/\/\* & \*\//' "$file"
+
+          # 1. 删除所有 sm6150-coresight 引用
+          for file in arch/arm64/boot/dts/qcom/*.dts*; do
+            if [ -f "$file" ] && grep -q "sm6150-coresight" "$file" 2>/dev/null; then
+              echo "Removing sm6150-coresight include from $file"
+              sed -i '/sm6150-coresight/d' "$file"
             fi
           done
 
-          # 2. 彻底清空 sm6150-coresight.dtsi（替换为空文件）
+          # 2. 清空 sm6150-coresight.dtsi
           if [ -f arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi ]; then
-            echo "Replacing sm6150-coresight.dtsi with empty file"
-            echo "/* empty - Coresight disabled */" > arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
+            echo "/* empty */" > arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
           fi
+
+          # 3. 删除所有 tpdm_west 引用
+          find arch/arm64/boot/dts -name "*.dts*" -exec sed -i '/tpdm_west/d' {} \; 2>/dev/null || true
+
+          # 4. 删除所有 sa6155 相关文件（该 SoC 与 violet 无关）
+          find arch/arm64/boot/dts/qcom -name "sa6155*.dts*" -exec rm -f {} \; 2>/dev/null || true
+          sed -i '/sa6155/d' arch/arm64/boot/dts/qcom/Makefile 2>/dev/null || true
+
+          # 5. 删除其他可能有问题的文件
+          for problematic in sa6155p sa6155adp qcs410; do
+            find arch/arm64/boot/dts/qcom -name "${problematic}.dts*" -exec rm -f {} \; 2>/dev/null || true
+            sed -i "/${problematic}/d" arch/arm64/boot/dts/qcom/Makefile 2>/dev/null || true
+          done
+
+          echo "Device tree fixes applied"
 
       - name: Load defconfig
         run: |
           cd "$GITHUB_WORKSPACE"
           make O="$OUT" ARCH="$ARCH" "$DEFCONFIG"
 
-      - name: Enable KernelSU and Droidspaces kernel configs
+      # ============================================================
+      # 开启 Droidspaces 所需的内核选项（无 KernelSU）
+      # ============================================================
+      - name: Enable Droidspaces kernel configs
         run: |
           cd "$GITHUB_WORKSPACE"
           CONFIG="$OUT/.config"
 
-          # 启用 KernelSU (使用 kprobe 方式)
-          ./scripts/config --file "$CONFIG" \
-            --enable KPROBES \
-            --enable KPROBE_EVENTS \
-            --enable KSU \
-            --disable KSU_MANUAL_HOOK
-
-          # 启用 Droidspaces
+          # 启用 Droidspaces 所需全部选项
           ./scripts/config --file "$CONFIG" \
             --enable SYSCTL \
             --enable SYSVIPC \
@@ -219,15 +219,15 @@ jobs:
             --enable IP_ADVANCED_ROUTER \
             --enable IP_MULTIPLE_TABLES
 
-          # 禁用 Android 网络隔离
+          # 禁用 Android 网络隔离（与 Droidspaces 冲突）
           ./scripts/config --file "$CONFIG" --disable ANDROID_PARANOID_NETWORK || true
 
-          # 禁用栈保护 (Clang 兼容性)
+          # 禁用栈保护（Clang 兼容性）
           ./scripts/config --file "$CONFIG" \
             --disable CC_STACKPROTECTOR_STRONG \
             --enable CC_STACKPROTECTOR_NONE
 
-          # 禁用 bpfilter (避免链接警告)
+          # 禁用 bpfilter（避免链接警告）
           ./scripts/config --file "$CONFIG" --disable BPFILTER || true
 
           # 重新生成配置
@@ -237,8 +237,6 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           echo "Kernel version: $(make O="$OUT" ARCH="$ARCH" kernelversion)"
-          echo "KernelSU configs:"
-          grep -E '^CONFIG_(KSU|KPROBES|KPROBE_EVENTS)=' "$OUT/.config" || true
           echo "Checking Droidspaces configs:"
           MISSING=0
           for cfg in SYSCTL SYSVIPC POSIX_MQUEUE NAMESPACES PID_NS UTS_NS IPC_NS NET_NS USER_NS SECCOMP SECCOMP_FILTER CGROUPS CGROUP_DEVICE CGROUP_PIDS MEMCG CGROUP_SCHED FAIR_GROUP_SCHED CGROUP_FREEZER CGROUP_NET_PRIO DEVTMPFS OVERLAY_FS TMPFS_POSIX_ACL TMPFS_XATTR FW_LOADER FW_LOADER_USER_HELPER VETH BRIDGE BRIDGE_NETFILTER NETFILTER NETFILTER_ADVANCED NF_CONNTRACK NF_CONNTRACK_IPV4 NF_NAT NF_NAT_IPV4 IP_NF_IPTABLES IP_NF_FILTER IP_NF_NAT IP_NF_TARGET_MASQUERADE NETFILTER_XT_TARGET_TCPMSS NETFILTER_XT_MATCH_ADDRTYPE NETFILTER_XT_MATCH_CONNTRACK NETFILTER_XT_MATCH_MULTIPORT NETFILTER_XT_MATCH_RECENT NF_NAT_REDIRECT IP_ADVANCED_ROUTER IP_MULTIPLE_TABLES; do
@@ -316,7 +314,7 @@ jobs:
           cd "$AIK"
           ./repackimg.sh
           test -f image-new.img
-          cp image-new.img "$GITHUB_WORKSPACE/boot-kernelsu-droidspaces.img"
+          cp image-new.img "$GITHUB_WORKSPACE/boot-droidspaces.img"
 
       # ============================================================
       # 生成校验和和发布文件
@@ -324,7 +322,7 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd "$GITHUB_WORKSPACE"
-          sha256sum boot-kernelsu-droidspaces.img > boot-kernelsu-droidspaces.img.sha256
+          sha256sum boot-droidspaces.img > boot-droidspaces.img.sha256
           sha256sum "$RUNNER_TEMP/images/dtbo.img" "$RUNNER_TEMP/images/recovery.img" "$RUNNER_TEMP/images/super_empty.img" "$RUNNER_TEMP/images/vbmeta.img" "$RUNNER_TEMP/images/build-manifest.xml" > original-files.sha256
 
       - name: Create release notes
@@ -332,30 +330,36 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           KERNEL_VERSION="$(make O="$OUT" ARCH="$ARCH" kernelversion)"
           cat > RELEASE.txt <<EOF
-          Redmi Note 7 Pro (violet) Kernel with KernelSU v0.9.5 + Droidspaces
+          Redmi Note 7 Pro (violet) Kernel with Droidspaces Support
 
           ROM: LineageOS 23.2
           ROM build: ${ROM_BUILD}
           Kernel version: ${KERNEL_VERSION}
-          Root: KernelSU v0.9.5 (non-GKI)
           Droidspaces: Enabled
+          KernelSU: NOT INCLUDED (use Magisk for root)
           Architecture: arm64
           Build commit: ${GITHUB_SHA}
 
-          Main file: boot-kernelsu-droidspaces.img
+          Main file: boot-droidspaces.img
           Matching ROM: lineage-23.2-${ROM_BUILD}-nightly-violet
 
-          Flash command: fastboot flash boot boot-kernelsu-droidspaces.img
+          Flash command:
+          1. fastboot flash boot boot-droidspaces.img
+          2. fastboot reboot
+          3. Install Magisk Manager and patch boot.img for root
+
+          Note: This kernel does NOT include KernelSU.
+          Root can be obtained via Magisk.
           EOF
           cat RELEASE.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: violet-kernelsu-${{ env.ROM_BUILD }}
+          name: violet-droidspaces-${{ env.ROM_BUILD }}
           path: |
-            boot-kernelsu-droidspaces.img
-            boot-kernelsu-droidspaces.img.sha256
+            boot-droidspaces.img
+            boot-droidspaces.img.sha256
             original-files.sha256
             RELEASE.txt
           retention-days: 30
@@ -363,12 +367,12 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "violet-${{ env.ROM_BUILD }}-${{ github.sha }}"
-          name: "violet KernelSU v0.9.5 + Droidspaces ${{ env.ROM_BUILD }}"
+          tag_name: "violet-droidspaces-${{ env.ROM_BUILD }}-${{ github.sha }}"
+          name: "violet Droidspaces Kernel ${{ env.ROM_BUILD }}"
           body_path: RELEASE.txt
           files: |
-            boot-kernelsu-droidspaces.img
-            boot-kernelsu-droidspaces.img.sha256
+            boot-droidspaces.img
+            boot-droidspaces.img.sha256
             original-files.sha256
           draft: false
           prerelease: false
