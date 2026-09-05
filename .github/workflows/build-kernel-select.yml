@@ -1,265 +1,509 @@
-name: MultiVariant Kernel Build | SM6150 violet
+name: Build Violet Droidspaces Kernel
+
 on:
   workflow_dispatch:
-  push:
 
-env:
-  DEFCONFIG: vendor/violet_defconfig
-  ARCH: arm64
-  STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
-  KERNEL_REPO: ${{ github.repository }}
+permissions:
+  contents: write
 
 jobs:
-  build-variant:
-    name: Build ${{ matrix.variant.name }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - name: droidspaces-only
-            apply_droidspaces_patch: true
-            apply_ksu: false
-            apply_susfs: false
-          - name: droidspaces+ksu
-            apply_droidspaces_patch: true
-            apply_ksu: true
-            apply_susfs: false
-          - name: droidspaces+ksu+susfs
-            apply_droidspaces_patch: true
-            apply_ksu: true
-            apply_susfs: true
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      KERNEL_DIR: ${{ github.workspace }}
+      OUT_DIR: ${{ github.workspace }}/out
+
+      ARCH: arm64
+      SUBARCH: arm64
+
+      DEFCONFIG: vendor/sdmsteppe-perf_defconfig
+
+      ROM_BUILD: "20260826"
+
+      BOOT_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/boot.img"
+
+      DTBO_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/dtbo.img"
+
+      RECOVERY_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/recovery.img"
+
+      SUPER_EMPTY_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/super_empty.img"
+
+      VBMETA_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/vbmeta.img"
+
+      MANIFEST_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/build-manifest.xml"
 
     steps:
-      - name: Checkout kernel source
+
+      # ==========================================================
+      # 1. Checkout
+      # ==========================================================
+
+      - name: Checkout kernel
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup build dependencies
-        run: |
-          sudo apt update -y
-          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves curl wget
-          git config --global user.name "GithubCI"
-          git config --global user.email "ci@github.com"
+      # ==========================================================
+      # 2. Dependencies
+      # ==========================================================
 
-      - name: Cache ccache ${{ matrix.variant.name }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ${{ github.workflow }}-${{ matrix.variant.name }}-${{ github.sha }}
-          restore-keys: |
-            ${{ github.workflow }}-${{ matrix.variant.name }}-
-
-      # ZyC Clang，加--no-tags提速
-      - name: Download ZyC Clang
+      - name: Install dependencies
         run: |
-          git clone --depth=1 --no-tags https://github.com/ZyCromerZ/Clang clang
-          echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
-          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          sudo apt-get update
 
-      # osm0sis mkbootimg工具
-      - name: Get mkbootimg / unpackbootimg from osm0sis
-        run: |
-          git clone --depth=1 --no-tags https://github.com/osm0sis/mkbootimg.git mkboot
-          cd mkboot
-          chmod +x mkbootimg unpackbootimg
-          echo "BOOT_TOOLS=$PWD" >> $GITHUB_ENV
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            cpio \
+            curl \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            xz-utils \
+            zip \
+            zstd
 
-      - name: Download official stock boot.img
+      # ==========================================================
+      # 3. Android Clang
+      # ==========================================================
+
+      - name: Download Android Clang
         run: |
-          if curl -L --fail ${{ env.STOCK_BOOT_URL }} -o stock-boot.img; then
-            echo "stock boot.img curl download success"
-          elif wget --no-verbose ${{ env.STOCK_BOOT_URL }} -O stock-boot.img; then
-            echo "stock boot.img wget fallback success"
-          else
-            echo "stock boot.img download failed"
+          mkdir -p "$RUNNER_TEMP/toolchain"
+
+          git clone \
+            --depth=1 \
+            --branch android12-release \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            "$RUNNER_TEMP/toolchain/clang"
+
+          CLANG_BIN=$(find \
+            "$RUNNER_TEMP/toolchain/clang" \
+            -type f \
+            -name clang \
+            | head -n1 \
+            | xargs dirname)
+
+          if [ -z "$CLANG_BIN" ]; then
+            echo "clang not found"
             exit 1
           fi
-          [ -f stock-boot.img ] || { echo "stock-boot.img missing"; exit 1; }
-          ls -la stock-boot.img
 
-      - name: Apply Droidspaces Non-GKI patches
-        if: matrix.variant.apply_droidspaces_patch == true
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
+
+          echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
+
+      - name: Check compiler
         run: |
-          git clone --depth=1 --no-tags https://github.com/ravindu644/Droidspaces-OSS droidspaces-src
-          cd droidspaces-src/assets/resources/kernel-patches/non-GKI
-          for p in *.patch; do
-            echo "Applying Droidspaces patch: $p"
-            git apply --verbose --3way --directory=../../../../ "$p"
-          done
-          cd ../../../../
+          clang --version
+          ld.lld --version
 
-      - name: Integrate KernelSU-Next legacy
-        if: matrix.variant.apply_ksu == true
+      # ==========================================================
+      # 4. Kernel information
+      # ==========================================================
+
+      - name: Kernel information
         run: |
-          curl -LSs --fail "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          cd "$KERNEL_DIR"
 
-      - name: Apply SUSFS4KSU 4.14 patches
-        if: matrix.variant.apply_susfs == true
+          echo "Kernel commit:"
+          git rev-parse HEAD
+
+          echo
+          echo "Kernel version:"
+          make kernelversion
+
+          echo
+          echo "Branch:"
+          git branch --show-current
+
+      # ==========================================================
+      # 5. Droidspaces patches
+      # ==========================================================
+
+      - name: Download Droidspaces patches
         run: |
-          git clone --depth=1 --no-tags https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu -b kernel-4.14
-          cp -r susfs4ksu/kernel_patches/fs/* fs/
-          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
-          for patch in susfs4ksu/kernel_patches/*.patch; do
-            echo "Applying SUSFS patch: $patch"
-            git apply --verbose --3way "$patch"
-          done
+          mkdir -p "$RUNNER_TEMP/droidspaces"
 
-      - name: Apply kernel config
+          curl -fL \
+            -o "$RUNNER_TEMP/droidspaces/01.patch" \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
+
+          curl -fL \
+            -o "$RUNNER_TEMP/droidspaces/02.patch" \
+            "https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
+
+      - name: Apply Droidspaces patches
         run: |
-          make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
-          ./scripts/config --file out/.config \
-          -e KPROBES \
-          -e KPROBE_EVENTS \
-          -e BPF \
-          -e BPF_SYSCALL \
-          -e KALLSYMS \
-          -e KALLSYMS_ALL \
-          -e MODULES \
-          -e MODULE_UNLOAD \
-          -e DEBUG_INFO \
-          -e DEBUG_INFO_BTF \
-          -e SYSVIPC \
-          -e IPC_NS \
-          -e PID_NS \
-          -e MOUNT_NS \
-          -e UTS_NS \
-          -e USER_NS \
-          -e NET_NS \
-          -e CGROUPS \
-          -e CGROUP_FREEZER \
-          -e CGROUP_PIDS \
-          -e CGROUP_DEVICES \
-          -e CGROUP_CPUACCT \
-          -e CGROUP_SCHED \
-          -e MEMCG \
-          -e SECCOMP \
-          -e SECCOMP_FILTER \
-          -e DEVTMPFS \
-          -e DEVTMPFS_MOUNT \
-          -e NETFILTER \
-          -e NETFILTER_XTABLES \
-          -e IP_NF_FILTER \
-          -e IP6_NF_FILTER \
-          -d ANDROID_PARANOID_NETWORK
+          cd "$KERNEL_DIR"
 
-          if [ "${{ matrix.variant.apply_ksu }}" = "true" ]; then
-            ./scripts/config --file out/.config -e KSU
+          patch --dry-run -p1 < \
+            "$RUNNER_TEMP/droidspaces/01.patch"
+
+          patch --dry-run -p1 < \
+            "$RUNNER_TEMP/droidspaces/02.patch"
+
+          patch -p1 < \
+            "$RUNNER_TEMP/droidspaces/01.patch"
+
+          patch -p1 < \
+            "$RUNNER_TEMP/droidspaces/02.patch"
+
+      # ==========================================================
+      # 6. KernelSU-Next
+      # ==========================================================
+
+      - name: Add KernelSU-Next
+        run: |
+          cd "$KERNEL_DIR"
+
+          curl -fLSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            | bash -
+
+      # ==========================================================
+      # 7. Generate base config
+      # ==========================================================
+
+      - name: Generate kernel config
+        run: |
+          cd "$KERNEL_DIR"
+
+          rm -rf "$OUT_DIR"
+
+          mkdir -p "$OUT_DIR"
+
+          make \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM=1 \
+            "$DEFCONFIG"
+
+      # ==========================================================
+      # 8. Droidspaces config
+      # ==========================================================
+
+      - name: Configure Droidspaces
+        run: |
+          cd "$KERNEL_DIR"
+
+          CONFIG="$OUT_DIR/.config"
+
+          ./scripts/config --file "$CONFIG" \
+            --enable SYSVIPC \
+            --enable POSIX_MQUEUE \
+            --enable NAMESPACES \
+            --enable PID_NS \
+            --enable UTS_NS \
+            --enable IPC_NS \
+            --enable MNT_NS \
+            --enable NET_NS \
+            --enable USER_NS \
+            --enable SECCOMP \
+            --enable SECCOMP_FILTER \
+            --enable CGROUPS \
+            --enable CGROUP_DEVICE \
+            --enable CGROUP_PIDS \
+            --enable MEMCG \
+            --enable CGROUP_SCHED \
+            --enable FAIR_GROUP_SCHED \
+            --enable CGROUP_FREEZER \
+            --enable CGROUP_NET_PRIO \
+            --enable DEVTMPFS \
+            --enable OVERLAY_FS \
+            --enable TMPFS_POSIX_ACL \
+            --enable TMPFS_XATTR \
+            --enable FW_LOADER \
+            --enable FW_LOADER_USER_HELPER \
+            --enable FW_LOADER_COMPRESS \
+            --enable VETH \
+            --enable BRIDGE \
+            --enable BRIDGE_NETFILTER \
+            --enable NETFILTER \
+            --enable NETFILTER_ADVANCED \
+            --enable NF_CONNTRACK \
+            --enable IP_NF_IPTABLES \
+            --enable IP_NF_FILTER \
+            --enable IP_NF_NAT \
+            --enable NF_NAT \
+            --enable NF_TABLES \
+            --enable IP_NF_TARGET_MASQUERADE \
+            --enable NETFILTER_XT_TARGET_MASQUERADE \
+            --enable NETFILTER_XT_TARGET_TCPMSS \
+            --enable NETFILTER_XT_MATCH_ADDRTYPE \
+            --enable NF_CONNTRACK_NETLINK \
+            --enable NF_NAT_REDIRECT \
+            --enable IP_ADVANCED_ROUTER \
+            --enable IP_MULTIPLE_TABLES \
+            --enable NF_CONNTRACK_IPV4 \
+            --enable NF_NAT_IPV4 \
+            --disable ANDROID_PARANOID_NETWORK
+
+          make \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM=1 \
+            olddefconfig
+
+      # ==========================================================
+      # 9. Verify config
+      # ==========================================================
+
+      - name: Verify configuration
+        run: |
+          cd "$KERNEL_DIR"
+
+          echo "========== Kernel =========="
+
+          make kernelversion
+
+          echo
+          echo "========== Droidspaces =========="
+
+          grep -E \
+            'CONFIG_(NAMESPACES|PID_NS|UTS_NS|IPC_NS|MNT_NS|NET_NS|USER_NS|SECCOMP|SECCOMP_FILTER|CGROUPS|CGROUP_DEVICE|CGROUP_PIDS|MEMCG|CGROUP_SCHED|CGROUP_FREEZER|OVERLAY_FS|DEVTMPFS|VETH|BRIDGE|BRIDGE_NETFILTER|NETFILTER)=' \
+            "$OUT_DIR/.config" || true
+
+          echo
+          echo "========== KernelSU =========="
+
+          grep -E \
+            'CONFIG_KSU' \
+            "$OUT_DIR/.config" || true
+
+          if ! grep -q '^CONFIG_KSU=y' "$OUT_DIR/.config"; then
+            echo "ERROR: CONFIG_KSU=y not found"
+            exit 1
           fi
-          if [ "${{ matrix.variant.apply_susfs }}" = "true" ]; then
-            ./scripts/config --file out/.config \
-            -e KSU_SUSFS \
-            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SPOOF_UNAME \
-            -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SUS_SU
+
+          if ! grep -q '^CONFIG_PID_NS=y' "$OUT_DIR/.config"; then
+            echo "ERROR: CONFIG_PID_NS=y not found"
+            exit 1
           fi
-          cp out/.config arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG }}
 
-      - name: Compile kernel ${{ matrix.variant.name }}
+      # ==========================================================
+      # 10. Build
+      # ==========================================================
+
+      - name: Build kernel
         run: |
-          export PATH=${{ env.CLANG_PATH }}:$PATH
-          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1
+          cd "$KERNEL_DIR"
 
-      - name: Copy kernel image and rename for variant
+          make -j"$(nproc)" \
+            O="$OUT_DIR" \
+            ARCH="$ARCH" \
+            LLVM=1 \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            Image.gz \
+            dtbs \
+            modules
+
+      # ==========================================================
+      # 11. Download official LineageOS images
+      # ==========================================================
+
+      - name: Download official images
         run: |
-          cp out/arch/${{ env.ARCH }}/boot/Image.gz-dtb ./Image-${{ matrix.variant.name }}.gz-dtb
-          [ -f Image-${{ matrix.variant.name }}.gz-dtb ] || { echo "Kernel image build failed!"; exit 1; }
-          ls -la Image-${{ matrix.variant.name }}.gz-dtb
+          mkdir -p "$RUNNER_TEMP/stock"
 
-      # 解包boot
-      - name: Unpack stock boot.img
+          curl -fL \
+            "$BOOT_URL" \
+            -o "$RUNNER_TEMP/stock/boot.img"
+
+          curl -fL \
+            "$DTBO_URL" \
+            -o "$RUNNER_TEMP/stock/dtbo.img"
+
+          curl -fL \
+            "$RECOVERY_URL" \
+            -o "$RUNNER_TEMP/stock/recovery.img"
+
+          curl -fL \
+            "$SUPER_EMPTY_URL" \
+            -o "$RUNNER_TEMP/stock/super_empty.img"
+
+          curl -fL \
+            "$VBMETA_URL" \
+            -o "$RUNNER_TEMP/stock/vbmeta.img"
+
+          curl -fL \
+            "$MANIFEST_URL" \
+            -o "$RUNNER_TEMP/stock/build-manifest.xml"
+
+          ls -lh "$RUNNER_TEMP/stock"
+
+      # ==========================================================
+      # 12. Download magiskboot
+      # ==========================================================
+
+      - name: Download magiskboot
         run: |
-          rm -rf boot_unpack
-          mkdir boot_unpack
-          ${{ env.BOOT_TOOLS }}/unpackbootimg -i stock-boot.img -o boot_unpack
-          [ -f boot_unpack/stock-boot.img-kernel ] || { echo "unpack failed"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/magisk"
 
-      # 替换内核+打包
-      - name: Replace kernel and repack boot ${{ matrix.variant.name }}
+          curl -fL \
+            "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk" \
+            -o "$RUNNER_TEMP/magisk/Magisk.apk"
+
+          unzip -j \
+            "$RUNNER_TEMP/magisk/Magisk.apk" \
+            "lib/x86_64/libmagiskboot.so" \
+            -d "$RUNNER_TEMP/magisk"
+
+          mv \
+            "$RUNNER_TEMP/magisk/libmagiskboot.so" \
+            "$RUNNER_TEMP/magisk/magiskboot"
+
+          chmod +x \
+            "$RUNNER_TEMP/magisk/magiskboot"
+
+          "$RUNNER_TEMP/magisk/magiskboot" --help || true
+
+      # ==========================================================
+      # 13. Repack boot.img
+      # ==========================================================
+
+      - name: Replace kernel and repack boot.img
         run: |
-          cp Image-${{ matrix.variant.name }}.gz-dtb boot_unpack/stock-boot.img-kernel
-          BASE=$(cat boot_unpack/stock-boot.img-base)
-          KERNEL_OFFSET=$(cat boot_unpack/stock-boot.img-kerneloff)
-          RAMDISK_OFFSET=$(cat boot_unpack/stock-boot.img-ramdiskoff)
-          SECOND_OFFSET=$(cat boot_unpack/stock-boot.img-secondoff)
-          TAGS_OFFSET=$(cat boot_unpack/stock-boot.img-tagsoff)
-          OS_VERSION=$(cat boot_unpack/stock-boot.img-osversion)
-          OS_PATCH=$(cat boot_unpack/stock-boot.img-ospatchlevel)
-          CMDLINE=$(cat boot_unpack/stock-boot.img-cmdline)
-          PAGESIZE=$(cat boot_unpack/stock-boot.img-pagesize)
+          mkdir -p "$RUNNER_TEMP/boot"
 
-          ${{ env.BOOT_TOOLS }}/mkbootimg \
-            --kernel boot_unpack/stock-boot.img-kernel \
-            --ramdisk boot_unpack/stock-boot.img-ramdisk.gz \
-            --second boot_unpack/stock-boot.img-second \
-            --base "$BASE" \
-            --kernel_offset "$KERNEL_OFFSET" \
-            --ramdisk_offset "$RAMDISK_OFFSET" \
-            --second_offset "$SECOND_OFFSET" \
-            --tags_offset "$TAGS_OFFSET" \
-            --pagesize "$PAGESIZE" \
-            --os_version "$OS_VERSION" \
-            --os_patch_level "$OS_PATCH" \
-            --cmdline "$CMDLINE" \
-            -o boot-${{ matrix.variant.name }}.img
+          cp \
+            "$RUNNER_TEMP/stock/boot.img" \
+            "$RUNNER_TEMP/boot/stock-boot.img"
 
-          [ -f boot-${{ matrix.variant.name }}.img ] || { echo "repack failed"; exit 1; }
-          ls -la boot-${{ matrix.variant.name }}.img
+          cd "$RUNNER_TEMP/boot"
 
-      - name: Generate SHA256 ${{ matrix.variant.name }}
+          "$RUNNER_TEMP/magisk/magiskboot" \
+            unpack stock-boot.img
+
+          echo "========== Unpacked boot =========="
+          ls -lah
+
+          if [ ! -f kernel ]; then
+            echo "ERROR: magiskboot did not produce kernel"
+            exit 1
+          fi
+
+          cp \
+            "$OUT_DIR/arch/arm64/boot/Image.gz" \
+            kernel
+
+          "$RUNNER_TEMP/magisk/magiskboot" \
+            repack stock-boot.img \
+            violet-droidspaces-ksu.img
+
+          if [ ! -f violet-droidspaces-ksu.img ]; then
+            echo "ERROR: boot image repack failed"
+            exit 1
+          fi
+
+          ls -lh violet-droidspaces-ksu.img
+
+      # ==========================================================
+      # 14. Prepare Release
+      # ==========================================================
+
+      - name: Prepare Release
         run: |
-          sha256sum Image-${{ matrix.variant.name }}.gz-dtb boot-${{ matrix.variant.name }}.img > sha256-${{ matrix.variant.name }}.txt
+          mkdir -p "$RUNNER_TEMP/release"
 
-      - name: Upload per-variant Artifact
+          cp \
+            "$RUNNER_TEMP/boot/violet-droidspaces-ksu.img" \
+            "$RUNNER_TEMP/release/violet-droidspaces-ksu.img"
+
+          cp \
+            "$OUT_DIR/arch/arm64/boot/Image.gz" \
+            "$RUNNER_TEMP/release/Image.gz"
+
+          cp \
+            "$RUNNER_TEMP/stock/dtbo.img" \
+            "$RUNNER_TEMP/release/dtbo-stock.img"
+
+          cp \
+            "$RUNNER_TEMP/stock/recovery.img" \
+            "$RUNNER_TEMP/release/recovery-stock.img"
+
+          cp \
+            "$RUNNER_TEMP/stock/super_empty.img" \
+            "$RUNNER_TEMP/release/super_empty-stock.img"
+
+          cp \
+            "$RUNNER_TEMP/stock/vbmeta.img" \
+            "$RUNNER_TEMP/release/vbmeta-stock.img"
+
+          cp \
+            "$RUNNER_TEMP/stock/build-manifest.xml" \
+            "$RUNNER_TEMP/release/build-manifest.xml"
+
+          cp \
+            "$OUT_DIR/.config" \
+            "$RUNNER_TEMP/release/kernel.config"
+
+          git rev-parse HEAD \
+            > "$RUNNER_TEMP/release/kernel.commit"
+
+          git log -1 \
+            --format='%H%n%s%n%ad' \
+            --date=iso \
+            > "$RUNNER_TEMP/release/kernel-info.txt"
+
+          cat > "$RUNNER_TEMP/release/build-info.txt" <<EOF
+          Device: Redmi Note 7 Pro
+          Codename: violet
+          ROM: LineageOS 23.2
+          ROM build: 20260826
+          Kernel: 4.14.357
+          Defconfig: vendor/sdmsteppe-perf_defconfig
+          Droidspaces: enabled
+          KernelSU-Next: enabled
+          SUSFS: disabled
+          EOF
+
+          cd "$RUNNER_TEMP/release"
+
+          sha256sum * > sha256sum.txt
+
+          ls -lah
+
+      # ==========================================================
+      # 15. Actions artifact
+      # ==========================================================
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ matrix.variant.name }}
-          path: |
-            Image-${{ matrix.variant.name }}.gz-dtb
-            boot-${{ matrix.variant.name }}.img
-            sha256-${{ matrix.variant.name }}.txt
+          name: violet-droidspaces-ksu
+          path: ${{ runner.temp }}/release/
 
-  release:
-    name: Create Release (collect all variants)
-    needs: build-variant
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./artifacts
-
-      - name: List downloaded artifacts
-        run: ls -R ./artifacts
-
-      - name: Collect all files for release
-        run: |
-          mkdir -p release-files
-          find ./artifacts -type f -exec cp {} ./release-files/ \;
-          ls -la ./release-files
+      # ==========================================================
+      # 16. GitHub Release
+      # ==========================================================
 
       - name: Create GitHub Release
-        uses: ncipollo/release-action@v1
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: violet-multi-kernel-$(date +%Y%m%d)
-          name: Multi-Variant Kernel | SM6150/violet Droidspaces+KSU+SUSFS
-          body: |
-            ## Build Info
-            - Device: Redmi Note7 Pro violet SM6150
-            - ROM: lineage-23.2
-            - Toolchain: ZyC Clang
-            - Boot Tool: osm0sis mkbootimg/unpackbootimg
-            ### Variants
-            1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
-            2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
-            3. **boot-droidspaces+ksu+susfs.img**: Full Droidspaces+KSU+SUSFS（目标完整版）
+          tag_name: "droidspaces-${{ github.run_number }}"
+          name: "Violet Droidspaces + KernelSU-Next ${{ github.run_number }}"
+          prerelease: true
+          generate_release_notes: true
 
-            ### Flash Instructions
-            Violet是A/B分区，**必须刷对应slot**
-            ```bash
-            fastboot flash boot_a boot-xxx.img
-            fastboot flash boot_b boot-xxx.img
-            fastboot reboot
+          files: |
+            ${{ runner.temp }}/release/violet-droidspaces-ksu.img
+            ${{ runner.temp }}/release/Image.gz
+            ${{ runner.temp }}/release/dtbo-stock.img
+            ${{ runner.temp }}/release/recovery-stock.img
+            ${{ runner.temp }}/release/super_empty-stock.img
+            ${{ runner.temp }}/release/vbmeta-stock.img
+            ${{ runner.temp }}/release/build-manifest.xml
+            ${{ runner.temp }}/release/kernel.config
+            ${{ runner.temp }}/release/kernel.commit
+            ${{ runner.temp }}/release/kernel-info.txt
+            ${{ runner.temp }}/release/build-info.txt
+            ${{ runner.temp }}/release/sha256sum.txt
