@@ -204,8 +204,6 @@ jobs:
 
           echo "LLVM=1" >> "$GITHUB_ENV"
 
-          # Linux 4.14 + old ARM64 kernel:
-          # 使用外部 assembler。
           echo "LLVM_IAS=0" >> "$GITHUB_ENV"
 
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
@@ -256,15 +254,12 @@ jobs:
           echo " KernelSU result"
           echo "========================================"
 
-          # 检查 KernelSU-Next 是否存在
           test -d KernelSU-Next
 
-          # 如果 KernelSU 符号链接不存在，手动创建
           if [ ! -e KernelSU ]; then
             ln -sf KernelSU-Next KernelSU
           fi
 
-          # 显示内容
           ls -lah KernelSU-Next
           ls -lah KernelSU
 
@@ -366,7 +361,6 @@ jobs:
             --enable IP_ADVANCED_ROUTER \
             --enable IP_MULTIPLE_TABLES
 
-          # Nicht für diesen alten Kernel erzwingen.
           ./scripts/config \
             --file "$OUT/.config" \
             --disable ANDROID_PARANOID_NETWORK || true
@@ -386,7 +380,7 @@ jobs:
           test -f "$OUT/.config"
 
       # ============================================================
-      # 12. Verify final config
+      # 12. Verify final configuration (修正后)
       # ============================================================
 
       - name: Verify final configuration
@@ -461,7 +455,6 @@ jobs:
           IP_NF_FILTER
           IP_NF_NAT
           IP_NF_TARGET_MASQUERADE
-          NETFILTER_XT_TARGET_MASQUERADE
           NETFILTER_XT_TARGET_TCPMSS
           NETFILTER_XT_MATCH_ADDRTYPE
           NETFILTER_XT_MATCH_CONNTRACK
@@ -472,7 +465,6 @@ jobs:
           IP_MULTIPLE_TABLES
           "
 
-          # 关键修正：初始化 FAILED 为 0
           FAILED=0
 
           for CONFIG in $REQUIRED_CONFIGS; do
