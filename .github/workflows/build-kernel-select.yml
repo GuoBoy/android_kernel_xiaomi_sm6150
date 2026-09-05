@@ -1,23 +1,8 @@
-name: Selectable Matrix Build | SM6150/violet MultiKernel
+name: MultiVariant Kernel Build | SM6150 violet
 on:
   workflow_dispatch:
-    inputs:
-      build_droidspaces_only:
-        description: Build droidspaces-only（仅Droidspaces，无KSU/SUSFS）
-        type: boolean
-        default: true
-      build_droidspaces_ksu:
-        description: Build droidspaces+ksu（Droidspaces + KernelSU-Next）
-        type: boolean
-        default: true
-      build_droidspaces_ksu_susfs:
-        description: Build droidspaces+ksu+susfs（完整目标版本）
-        type: boolean
-        default: true
-      build_stock_base:
-        description: Build stock-base（基准原版内核）
-        type: boolean
-        default: false
+  push:
+    branches: [ lineage-23.2 ]
 
 env:
   DEFCONFIG: vendor/violet_defconfig
@@ -27,60 +12,25 @@ env:
   KERNEL_BRANCH: lineage-23.2
 
 jobs:
-  generate-matrix:
-    name: Generate build matrix
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Create matrix json
-        id: set-matrix
-        run: |
-          python3 - <<END
-          import json
-          variants = []
-          if "${{ github.event.inputs.build_droidspaces_only }}" == "true":
-              variants.append({
-                "name": "droidspaces-only",
-                "apply_droidspaces_patch": True,
-                "apply_ksu": False,
-                "apply_susfs": False
-              })
-          if "${{ github.event.inputs.build_droidspaces_ksu }}" == "true":
-              variants.append({
-                "name": "droidspaces+ksu",
-                "apply_droidspaces_patch": True,
-                "apply_ksu": True,
-                "apply_susfs": False
-              })
-          if "${{ github.event.inputs.build_droidspaces_ksu_susfs }}" == "true":
-              variants.append({
-                "name": "droidspaces+ksu+susfs",
-                "apply_droidspaces_patch": True,
-                "apply_ksu": True,
-                "apply_susfs": True
-              })
-          if "${{ github.event.inputs.build_stock_base }}" == "true":
-              variants.append({
-                "name": "stock-base",
-                "apply_droidspaces_patch": False,
-                "apply_ksu": False,
-                "apply_susfs": False
-              })
-          # 输出合法json，空的时候输出[]
-          print(f"matrix={json.dumps(variants)}")
-          END
-
   build-variant:
     name: Build ${{ matrix.variant.name }}
-    needs: generate-matrix
-    # 新增判断：matrix不为空才执行
-    if: ${{ fromJson(needs.generate-matrix.outputs.matrix) != '[]' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+        variant:
+          - name: droidspaces-only
+            apply_droidspaces_patch: true
+            apply_ksu: false
+            apply_susfs: false
+          - name: droidspaces+ksu
+            apply_droidspaces_patch: true
+            apply_ksu: true
+            apply_susfs: false
+          - name: droidspaces+ksu+susfs
+            apply_droidspaces_patch: true
+            apply_ksu: true
+            apply_susfs: true
 
     steps:
       - name: Checkout kernel source ${{ matrix.variant.name }}
@@ -257,10 +207,8 @@ jobs:
             sha256-${{ matrix.variant.name }}.txt
 
   release:
-    name: Create Release (collect selected variants)
+    name: Create Release (collect all variants)
     needs: build-variant
-    # 如果build-variant没运行（空matrix），跳过release
-    if: ${{ !cancelled() && fromJson(needs.generate-matrix.outputs.matrix) != '[]' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -280,21 +228,20 @@ jobs:
       - name: Create GitHub Release
         uses: ncipollo/release-action@v1
         with:
-          tag_name: violet-select-kernel-$(date +%Y%m%d)
-          name: Select-Build Kernel | SM6150/violet Droidspaces+KSU+SUSFS
+          tag_name: violet-multi-kernel-$(date +%Y%m%d)
+          name: Multi-Variant Kernel | SM6150/violet Droidspaces+KSU+SUSFS
           body: |
             ## Build Info
             - Device: Redmi Note7 Pro violet SM6150
             - ROM: lineage-23.2-20260826-nightly-violet
             - Kernel Source: android_kernel_xiaomi_sm6150 lineage-23.2
-            > This build only includes variants you selected before run.
-            ## Variants description:
+
+            ### Variants
             1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
             2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
             3. **boot-droidspaces+ksu+susfs.img**: Full Droidspaces+KSU+SUSFS（目标完整版）
-            4. **boot-stock-base.img**: Stock kernel with base config only（基准）
 
-            ### Flash command example
+            ### Flash example
             ```bash
             fastboot flash boot boot-droidspaces-only.img
             fastboot reboot
