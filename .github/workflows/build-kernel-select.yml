@@ -1,252 +1,215 @@
-name: MultiVariant Kernel Build | SM6150 violet
+name: Build Kernel for violet (LineageOS 23.2 + Droidspaces + KernelSU-Next + SUSFS)
+
 on:
   workflow_dispatch:
-  push:
-
-env:
-  DEFCONFIG: vendor/violet_defconfig
-  ARCH: arm64
-  STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
-  KERNEL_REPO: ${{ github.repository }}
+    inputs:
+      susfs_version:
+        description: 'SUSFS tag (default: v1.5.5)'
+        required: false
+        default: 'v1.5.5'
+        type: string
 
 jobs:
-  build-variant:
-    name: Build ${{ matrix.variant.name }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant:
-          - name: droidspaces-only
-            apply_droidspaces_patch: true
-            apply_ksu: false
-            apply_susfs: false
-          - name: droidspaces+ksu
-            apply_droidspaces_patch: true
-            apply_ksu: true
-            apply_susfs: false
-          - name: droidspaces+ksu+susfs
-            apply_droidspaces_patch: true
-            apply_ksu: true
-            apply_susfs: true
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
+          path: kernel
           fetch-depth: 0
 
-      - name: Setup build dependencies
+      - name: Prepare environment
         run: |
-          sudo apt update -y
-          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves curl wget
-          git config --global user.name "GithubCI"
-          git config --global user.email "ci@github.com"
+          sudo apt update
+          sudo apt install -y git build-essential libssl-dev flex bison bc \
+            libelf-dev ccache cpio python3 python3-pip lz4 \
+            gcc-aarch64-linux-gnu abootimg wget unzip
 
-      - name: Cache ccache ${{ matrix.variant.name }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: ${{ github.workflow }}-${{ matrix.variant.name }}-${{ github.sha }}
-          restore-keys: |
-            ${{ github.workflow }}-${{ matrix.variant.name }}-
-
-      # ZyC Clang，加--no-tags提速
-      - name: Download ZyC Clang
+      - name: Setup Clang toolchain
         run: |
-          git clone --depth=1 --no-tags https://github.com/ZyCromerZ/Clang clang
-          echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
-          echo "$PWD/clang/bin" >> $GITHUB_PATH
+          git clone --depth=1 -b android12-gsi \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            clang
 
-      # ========== MagiskBoot，curl优先，wget备选 双重保险 ==========
-      - name: Get magiskboot binary
+      - name: Integrate KernelSU-Next (legacy for non-GKI)
         run: |
-          mkdir -p mkboot
-          cd mkboot
-          if curl -L --fail https://github.com/topjohnwu/Magisk/releases/download/v28.0/magiskboot -o magiskboot; then
-            echo "curl download success"
-          elif wget --no-verbose https://github.com/topjohnwu/Magisk/releases/download/v28.0/magiskboot -O magiskboot; then
-            echo "wget fallback download success"
+          cd kernel
+          # 此脚本会自动克隆 KernelSU-Next 到当前目录的 KernelSU-Next 文件夹
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -
+          # 无需重命名，后续直接引用 KernelSU-Next 即可
+
+      - name: Integrate SUSFS
+        run: |
+          cd kernel
+          # 克隆 SUSFS
+          git clone --depth=1 -b ${{ github.event.inputs.susfs_version }} \
+            https://github.com/Star-Seven/susfs4ksu.git susfs
+          
+          # 应用补丁（针对 4.19 内核）
+          PATCH_DIR="susfs/kernel_patches/4.19"
+          if [ -d "$PATCH_DIR" ]; then
+            for patch in $PATCH_DIR/*.patch; do
+              patch -p1 < "$patch"
+            done
           else
-            echo "magiskboot download failed"
-            exit 1
+            # 降级到通用补丁
+            for patch in susfs/kernel_patches/*.patch; do
+              patch -p1 < "$patch" || true
+            done
           fi
-          chmod +x magiskboot
-          echo "BOOT_TOOLS=$PWD" >> $GITHUB_ENV
+          
+          # 复制 SUSFS 源码
+          cp -r susfs/susfs-ksu .
+          # 修改内核根目录 Makefile，包含 SUSFS
+          echo "obj-y += susfs-ksu/" >> Makefile
 
-      - name: Download official stock boot.img
+      - name: Enable kernel configs (Droidspaces + KSU-Next + SUSFS)
         run: |
-          if curl -L --fail ${{ env.STOCK_BOOT_URL }} -o stock-boot.img; then
-            echo "stock boot.img curl download success"
-          elif wget --no-verbose ${{ env.STOCK_BOOT_URL }} -O stock-boot.img; then
-            echo "stock boot.img wget fallback success"
+          cd kernel
+          # 确定 defconfig
+          DEFCONFIG="arch/arm64/configs/violet_defconfig"
+          if [ ! -f "$DEFCONFIG" ]; then
+            DEFCONFIG="arch/arm64/configs/sm6150-perf_defconfig"
+          fi
+          
+          # 一次性追加所有配置
+          cat >> "$DEFCONFIG" << 'EOF'
+          # ===== Droidspaces =====
+          CONFIG_SYSCTL=y
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_NAMESPACES=y
+          CONFIG_PID_NS=y
+          CONFIG_UTS_NS=y
+          CONFIG_IPC_NS=y
+          CONFIG_SECCOMP=y
+          CONFIG_SECCOMP_FILTER=y
+          CONFIG_CGROUPS=y
+          CONFIG_CGROUP_DEVICE=y
+          CONFIG_CGROUP_PIDS=y
+          CONFIG_MEMCG=y
+          CONFIG_CGROUP_SCHED=y
+          CONFIG_FAIR_GROUP_SCHED=y
+          CONFIG_CGROUP_FREEZER=y
+          CONFIG_CGROUP_NET_PRIO=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_OVERLAY_FS=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
+          CONFIG_FW_LOADER=y
+          CONFIG_FW_LOADER_USER_HELPER=y
+          CONFIG_FW_LOADER_COMPRESS=y
+          CONFIG_NET_NS=y
+          CONFIG_VETH=y
+          CONFIG_BRIDGE=y
+          CONFIG_BRIDGE_NETFILTER=y
+          CONFIG_NETFILTER=y
+          CONFIG_NETFILTER_ADVANCED=y
+          CONFIG_NF_CONNTRACK=y
+          CONFIG_IP_NF_IPTABLES=y
+          CONFIG_IP_NF_FILTER=y
+          CONFIG_NF_NAT=y
+          CONFIG_NF_TABLES=y
+          CONFIG_IP_NF_TARGET_MASQUERADE=y
+          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
+          CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NF_CONNTRACK_NETLINK=y
+          CONFIG_NF_NAT_REDIRECT=y
+          CONFIG_IP_ADVANCED_ROUTER=y
+          CONFIG_IP_MULTIPLE_TABLES=y
+          CONFIG_NF_CONNTRACK_IPV4=y
+          CONFIG_NF_NAT_IPV4=y
+          CONFIG_IP_NF_NAT=y
+          # ===== KernelSU-Next =====
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_KSU_KPROBE_HOOKS=y
+          CONFIG_KSU=y
+          CONFIG_KSU_LEGACY_NON_GKI=y
+          CONFIG_KSU_WITH_HOOKS=y
+          # ===== SUSFS =====
+          CONFIG_SUSFS=y
+          CONFIG_SUSFS_HIDE_PROCESSES=y
+          CONFIG_SUSFS_HIDE_MOUNTS=y
+          CONFIG_SUSFS_USE_KSU_HOOKS=y
+          CONFIG_SUSFS_SUS_SU=y
+          CONFIG_SUSFS_ENABLE_LOG=y
+          CONFIG_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_OWNER=y
+          EOF
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export PATH=$PWD/../clang/bin:$PATH
+          
+          # 生成配置
+          make -j$(nproc) O=out violet_defconfig
+          # 编译内核和模块
+          make -j$(nproc) O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            Image.gz-dtb dtbo.img modules
+
+      - name: Package AnyKernel3 (Recovery flash)
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          cd AnyKernel3
+          cp ../kernel/out/arch/arm64/boot/Image.gz-dtb .
+          cp ../kernel/out/arch/arm64/boot/dtbo.img .
+          # 复制所有编译出的内核模块（自动安装到 /vendor）
+          find ../kernel/out -name "*.ko" -exec cp {} . \;
+          # 清理可能存在的旧文件
+          rm -f anykernel.sh.bak
+          zip -r9 ../AnyKernel3-violet.zip * .gitignore
+
+      - name: Generate boot.img for Fastboot (optional)
+        run: |
+          # 尝试下载官方 boot.img 作为模板
+          wget -O stock_boot.img https://mirrorbits.lineageos.org/full/violet/20260826/boot.img || echo "Download failed, skipping boot.img generation."
+          if [ -f stock_boot.img ]; then
+            cd kernel
+            # 解包官方 boot.img
+            abootimg -x ../stock_boot.img
+            # 替换内核
+            cp out/arch/arm64/boot/Image.gz-dtb zImage
+            # 重新打包
+            abootimg --create ../boot.img -f bootimg.cfg -k zImage -r initrd.img
+            cd ..
+            echo "boot.img generated successfully."
           else
-            echo "stock boot.img download failed"
-            exit 1
+            echo "⚠️ 无法获取官方 boot.img，跳过生成 boot.img。您可以使用 AnyKernel3.zip 在 Recovery 中刷入。"
+            # 创建空文件避免 release 报错
+            touch boot.img
           fi
-          [ -f stock-boot.img ] || { echo "stock-boot.img missing"; exit 1; }
-          ls -la stock-boot.img
 
-      - name: Apply Droidspaces Non-GKI patches
-        if: matrix.variant.apply_droidspaces_patch == true
+      - name: Create Release and Upload
+        id: create_release
         run: |
-          git clone --depth=1 --no-tags https://github.com/ravindu644/Droidspaces-OSS droidspaces-src
-          cd droidspaces-src/assets/resources/kernel-patches/non-GKI
-          for p in *.patch; do
-            echo "Applying Droidspaces patch: $p"
-            git apply --verbose --3way --directory=../../../../ "$p"
-          done
-          cd ../../../../
+          TAG="v$(date +'%Y.%m.%d-%H%M')"
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          git tag $TAG
+          git push origin $TAG
 
-      - name: Integrate KernelSU-Next legacy
-        if: matrix.variant.apply_ksu == true
-        run: |
-          curl -LSs --fail "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
-
-      - name: Apply SUSFS4KSU 4.14 patches
-        if: matrix.variant.apply_susfs == true
-        run: |
-          git clone --depth=1 --no-tags https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu -b kernel-4.14
-          cp -r susfs4ksu/kernel_patches/fs/* fs/
-          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
-          for patch in susfs4ksu/kernel_patches/*.patch; do
-            echo "Applying SUSFS patch: $patch"
-            git apply --verbose --3way "$patch"
-          done
-
-      - name: Apply kernel config
-        run: |
-          make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
-          ./scripts/config --file out/.config \
-          -e KPROBES \
-          -e KPROBE_EVENTS \
-          -e BPF \
-          -e BPF_SYSCALL \
-          -e KALLSYMS \
-          -e KALLSYMS_ALL \
-          -e MODULES \
-          -e MODULE_UNLOAD \
-          -e DEBUG_INFO \
-          -e DEBUG_INFO_BTF \
-          -e SYSVIPC \
-          -e IPC_NS \
-          -e PID_NS \
-          -e MOUNT_NS \
-          -e UTS_NS \
-          -e USER_NS \
-          -e NET_NS \
-          -e CGROUPS \
-          -e CGROUP_FREEZER \
-          -e CGROUP_PIDS \
-          -e CGROUP_DEVICES \
-          -e CGROUP_CPUACCT \
-          -e CGROUP_SCHED \
-          -e MEMCG \
-          -e SECCOMP \
-          -e SECCOMP_FILTER \
-          -e DEVTMPFS \
-          -e DEVTMPFS_MOUNT \
-          -e NETFILTER \
-          -e NETFILTER_XTABLES \
-          -e IP_NF_FILTER \
-          -e IP6_NF_FILTER \
-          -d ANDROID_PARANOID_NETWORK
-
-          if [ "${{ matrix.variant.apply_ksu }}" = "true" ]; then
-            ./scripts/config --file out/.config -e KSU
-          fi
-          if [ "${{ matrix.variant.apply_susfs }}" = "true" ]; then
-            ./scripts/config --file out/.config \
-            -e KSU_SUSFS \
-            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
-            -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SPOOF_UNAME \
-            -e KSU_SUSFS_TRY_UMOUNT \
-            -e KSU_SUSFS_SUS_SU
-          fi
-          cp out/.config arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG }}
-
-      - name: Compile kernel ${{ matrix.variant.name }}
-        run: |
-          export PATH=${{ env.CLANG_PATH }}:$PATH
-          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1
-
-      - name: Copy kernel image and rename for variant
-        run: |
-          cp out/arch/${{ env.ARCH }}/boot/Image.gz-dtb ./Image-${{ matrix.variant.name }}.gz-dtb
-          [ -f Image-${{ matrix.variant.name }}.gz-dtb ] || { echo "Kernel image build failed!"; exit 1; }
-          ls -la Image-${{ matrix.variant.name }}.gz-dtb
-
-      # Magiskboot解包
-      - name: Unpack stock boot.img
-        run: |
-          rm -rf boot_unpack
-          mkdir boot_unpack
-          cd boot_unpack
-          ${{ env.BOOT_TOOLS }}/magiskboot unpack ../stock-boot.img
-          [ -f kernel ] || { echo "unpack failed, no kernel extracted"; exit 1; }
-
-      # 替换kernel，打包新boot
-      - name: Replace kernel and repack boot ${{ matrix.variant.name }}
-        run: |
-          cp Image-${{ matrix.variant.name }}.gz-dtb boot_unpack/kernel
-          cd boot_unpack
-          ${{ env.BOOT_TOOLS }}/magiskboot repack ../stock-boot.img ../boot-${{ matrix.variant.name }}.img
-          cd ..
-          [ -f boot-${{ matrix.variant.name }}.img ] || { echo "repack boot failed"; exit 1; }
-          ls -la boot-${{ matrix.variant.name }}.img
-
-      - name: Generate SHA256 ${{ matrix.variant.name }}
-        run: |
-          sha256sum Image-${{ matrix.variant.name }}.gz-dtb boot-${{ matrix.variant.name }}.img > sha256-${{ matrix.variant.name }}.txt
-
-      - name: Upload per-variant Artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload Assets
+        uses: softprops/action-gh-release@v2
         with:
-          name: build-${{ matrix.variant.name }}
-          path: |
-            Image-${{ matrix.variant.name }}.gz-dtb
-            boot-${{ matrix.variant.name }}.img
-            sha256-${{ matrix.variant.name }}.txt
-
-  release:
-    name: Create Release (collect all variants)
-    needs: build-variant
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./artifacts
-
-      - name: List downloaded artifacts
-        run: ls -R ./artifacts
-
-      - name: Collect all files for release
-        run: |
-          mkdir -p release-files
-          find ./artifacts -type f -exec cp {} ./release-files/ \;
-          ls -la ./release-files
-
-      - name: Create GitHub Release
-        uses: ncipollo/release-action@v1
-        with:
-          tag_name: violet-multi-kernel-$(date +%Y%m%d)
-          name: Multi-Variant Kernel | SM6150/violet Droidspaces+KSU+SUSFS
+          tag_name: ${{ env.TAG }}
+          name: "Kernel for violet - ${{ env.TAG }}"
           body: |
-            ## Build Info
-            - Device: Redmi Note7 Pro violet SM6150
-            - ROM: lineage-23.2
-            - Toolchain: ZyC Clang
-            - Boot Tool: MagiskBoot v28.0
-            ### Variants
-            1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
-            2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
-            3. **boot-droidspaces+ksu+susfs.img**: Full Droidspaces+KSU+SUSFS（目标完整版）
-
-            ### Flash Instructions
-            Violet是A/B分区，**必须刷对应slot**
-            ```bash
-            fastboot flash boot_a boot-xxx.img
-            fastboot flash boot_b boot-xxx.img
-            fastboot reboot
+            ## 📦 刷机包说明
+            - **AnyKernel3-violet.zip**：在 Recovery (TWRP/OrangeFox) 中卡刷（**推荐**，自动安装内核模块）
+            - **boot.img**（如果生成成功）：使用 `fastboot flash boot boot.img` 刷入（若 WiFi/触控失灵，请改用 AnyKernel3）
+          files: |
+            AnyKernel3-violet.zip
+            boot.img
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
