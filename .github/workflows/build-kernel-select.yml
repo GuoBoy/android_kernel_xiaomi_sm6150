@@ -101,8 +101,6 @@ jobs:
 
       # ============================================================
       # 4. clang cache
-      #
-      # 只缓存已经成功下载的 clang-r547379。
       # ============================================================
 
       - name: Restore Android clang cache
@@ -114,13 +112,6 @@ jobs:
 
       # ============================================================
       # 5. Download clang
-      #
-      # 不使用不存在的 GitHub LineageOS clang 仓库。
-      #
-      # 使用 Android googlesource 的预编译 clang 仓库。
-      #
-      # 这里不 checkout 不存在的 Android tag。
-      # 直接获取仓库中对应的 clang-r547379。
       # ============================================================
 
       - name: Download Android clang
@@ -234,13 +225,7 @@ jobs:
           echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 9. KernelSU-Next
-      #
-      # 不使用 setup.sh 参数。
-      #
-      # setup.sh 必须在 kernel source root 执行。
-      #
-      # 官方脚本自己处理 KernelSU-Next。
+      # 9. KernelSU-Next (修正：手动创建符号链接)
       # ============================================================
 
       - name: Integrate KernelSU-Next
@@ -271,8 +256,16 @@ jobs:
           echo " KernelSU result"
           echo "========================================"
 
-          test -e KernelSU
+          # 检查 KernelSU-Next 是否存在
+          test -d KernelSU-Next
 
+          # 如果 KernelSU 符号链接不存在，手动创建
+          if [ ! -e KernelSU ]; then
+            ln -sf KernelSU-Next KernelSU
+          fi
+
+          # 显示内容
+          ls -lah KernelSU-Next
           ls -lah KernelSU
 
       # ============================================================
@@ -298,11 +291,6 @@ jobs:
 
       # ============================================================
       # 11. Enable KernelSU + Droidspaces
-      #
-      # 注意：
-      # 不再使用 CONFIG_KSU_KPROBE_HOOKS。
-      # 之前失败就是因为这个配置项并不适用于当前
-      # KernelSU-Next legacy 环境。
       # ============================================================
 
       - name: Enable KernelSU and Droidspaces
