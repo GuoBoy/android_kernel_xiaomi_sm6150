@@ -146,10 +146,10 @@ jobs:
             fi
           done
 
-          # 2. 删除 sm6150-coresight.dtsi 第440行（语法错误）
+          # 2. 彻底禁用 sm6150-coresight.dtsi（注释掉全部内容）
           if [ -f arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi ]; then
-            echo "Deleting line 440 from sm6150-coresight.dtsi"
-            sed -i '440d' arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
+            echo "Disabling sm6150-coresight.dtsi by commenting out all lines"
+            sed -i 's/^/\/\* /; s/$/ \*\//' arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
           fi
 
       - name: Load defconfig
