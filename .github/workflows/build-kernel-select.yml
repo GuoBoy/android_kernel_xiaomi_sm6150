@@ -1,6 +1,10 @@
-name: Violet Droidspaces KSU
+name: Violet Droidspaces KernelSU
 
 on:
+  push:
+    branches:
+      - lineage-23.2
+
   workflow_dispatch:
 
 permissions:
@@ -8,12 +12,16 @@ permissions:
 
 jobs:
   build:
+    name: Build Redmi Note 7 Pro Kernel
     runs-on: ubuntu-22.04
 
     env:
       ARCH: arm64
+      SUBARCH: arm64
       DEFCONFIG: vendor/sdmsteppe-perf_defconfig
       OUT: ${{ github.workspace }}/out
+
+      CLANG_VERSION: clang-r383902
 
       BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
       DTBO_URL: https://mirrorbits.lineageos.org/full/violet/20260826/dtbo.img
@@ -24,22 +32,30 @@ jobs:
 
     steps:
 
-      - name: Checkout
+      # ==========================================================
+      # Checkout
+      # ==========================================================
+
+      - name: Checkout kernel
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      # =========================================================
+      # ==========================================================
       # Dependencies
-      # =========================================================
+      # ==========================================================
 
-      - name: Dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
+
           sudo apt-get install -y \
             bc \
             bison \
             build-essential \
             ccache \
             cpio \
+            curl \
             flex \
             git \
             libelf-dev \
@@ -47,45 +63,139 @@ jobs:
             python3 \
             unzip \
             wget \
-            curl \
             zip \
-            xz-utils
+            xz-utils \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu
 
-      # =========================================================
-      # Clang clang-r416183b
-      # =========================================================
+      # ==========================================================
+      # Android Clang r383902
+      # ==========================================================
 
-      - name: Setup Clang
+      - name: Setup Android Clang
         run: |
+          mkdir -p "$RUNNER_TEMP/toolchain"
+
           git clone \
             --depth=1 \
             --branch android12-release \
             https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            "$RUNNER_TEMP/clang"
+            "$RUNNER_TEMP/toolchain/clang"
 
-          test -d "$RUNNER_TEMP/clang/clang-r416183b/bin"
+          test -x \
+            "$RUNNER_TEMP/toolchain/clang/${CLANG_VERSION}/bin/clang"
 
-          echo "$RUNNER_TEMP/clang/clang-r416183b/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/toolchain/clang/${CLANG_VERSION}/bin" \
+            >> "$GITHUB_PATH"
+
+          echo "========== CLANG =========="
+
+          "$RUNNER_TEMP/toolchain/clang/${CLANG_VERSION}/bin/clang" \
+            --version
+
+      # ==========================================================
+      # LLVM / binutils
+      # ==========================================================
+
+      - name: Check LLVM tools
+        run: |
+          command -v clang
+          command -v ld.lld
+          command -v llvm-ar
+          command -v llvm-nm
+          command -v llvm-objcopy
+          command -v llvm-objdump
+          command -v llvm-readelf
+          command -v llvm-strip
 
           clang --version
+          ld.lld --version
 
-      # =========================================================
+      # ==========================================================
+      # Cross compiler
+      #
+      # LineageOS 23.2 official SM6150 config:
+      #
+      # CROSS_COMPILE=aarch64-linux-androidkernel-
+      # CLANG_TRIPLE=aarch64-linux-gnu-
+      #
+      # Ubuntu's aarch64-linux-gnu toolchain is used for the
+      # external binutils required by this old 4.14 kernel.
+      # ==========================================================
+
+      - name: Setup cross compiler
+        run: |
+          mkdir -p "$RUNNER_TEMP/cross"
+
+          ln -sf \
+            "$(command -v aarch64-linux-gnu-ld)" \
+            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-ld"
+
+          ln -sf \
+            "$(command -v aarch64-linux-gnu-as)" \
+            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-as"
+
+          ln -sf \
+            "$(command -v aarch64-linux-gnu-objcopy)" \
+            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-objcopy"
+
+          ln -sf \
+            "$(command -v aarch64-linux-gnu-objdump)" \
+            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-objdump"
+
+          ln -sf \
+            "$(command -v aarch64-linux-gnu-nm)" \
+            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-nm"
+
+          ln -sf \
+            "$(command -v aarch64-linux-gnu-strip)" \
+            "$RUNNER_TEMP/cross/aarch64-linux-androidkernel-strip"
+
+          echo "$RUNNER_TEMP/cross" >> "$GITHUB_PATH"
+
+          ls -lah "$RUNNER_TEMP/cross"
+
+      # ==========================================================
       # KernelSU-Next
-      # =========================================================
+      # ==========================================================
 
-      - name: KernelSU-Next
+      - name: Add KernelSU-Next
         run: |
           cd "$GITHUB_WORKSPACE"
 
           curl -LSs \
-            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh \
             | bash -
 
-      # =========================================================
-      # Defconfig
-      # =========================================================
+      # ==========================================================
+      # Environment
+      # ==========================================================
 
-      - name: Defconfig
+      - name: Configure build environment
+        run: |
+          echo "CC=clang" >> "$GITHUB_ENV"
+          echo "LD=ld.lld" >> "$GITHUB_ENV"
+          echo "AR=llvm-ar" >> "$GITHUB_ENV"
+          echo "NM=llvm-nm" >> "$GITHUB_ENV"
+          echo "OBJCOPY=llvm-objcopy" >> "$GITHUB_ENV"
+          echo "OBJDUMP=llvm-objdump" >> "$GITHUB_ENV"
+          echo "READELF=llvm-readelf" >> "$GITHUB_ENV"
+          echo "OBJSIZE=llvm-size" >> "$GITHUB_ENV"
+          echo "STRIP=llvm-strip" >> "$GITHUB_ENV"
+
+          echo "CROSS_COMPILE=$RUNNER_TEMP/cross/aarch64-linux-androidkernel-" \
+            >> "$GITHUB_ENV"
+
+          echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+
+          echo "LLVM=1" >> "$GITHUB_ENV"
+          echo "LLVM_IAS=1" >> "$GITHUB_ENV"
+
+      # ==========================================================
+      # Defconfig
+      # ==========================================================
+
+      - name: Generate defconfig
         run: |
           cd "$GITHUB_WORKSPACE"
 
@@ -94,15 +204,28 @@ jobs:
           make \
             O="$OUT" \
             ARCH="$ARCH" \
-            LLVM=1 \
-            LLVM_IAS=0 \
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            NM="$NM" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
+            READELF="$READELF" \
+            OBJSIZE="$OBJSIZE" \
+            STRIP="$STRIP" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CLANG_TRIPLE="$CLANG_TRIPLE" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
             "$DEFCONFIG"
 
-      # =========================================================
-      # Droidspaces configuration
-      # =========================================================
+          test -f "$OUT/.config"
 
-      - name: Droidspaces config
+      # ==========================================================
+      # Droidspaces configuration
+      # ==========================================================
+
+      - name: Configure Droidspaces
         run: |
           cd "$GITHUB_WORKSPACE"
 
@@ -116,9 +239,6 @@ jobs:
             --enable PID_NS \
             --enable UTS_NS \
             --enable IPC_NS \
-            --enable MNT_NS \
-            --enable NET_NS \
-            --enable USER_NS \
             --enable SECCOMP \
             --enable SECCOMP_FILTER \
             --enable CGROUPS \
@@ -133,107 +253,186 @@ jobs:
             --enable OVERLAY_FS \
             --enable TMPFS_POSIX_ACL \
             --enable TMPFS_XATTR \
+            --enable FW_LOADER \
+            --enable FW_LOADER_USER_HELPER \
+            --enable NETFILTER_XT_MATCH_CONNTRACK \
+            --enable NETFILTER_XT_MATCH_MULTIPORT \
+            --enable NETFILTER_XT_MATCH_HL \
+            --enable NETFILTER_XT_TARGET_REJECT \
+            --enable IP_NF_TARGET_REJECT \
+            --enable NETFILTER_XT_TARGET_LOG \
+            --enable IP_NF_TARGET_ULOG \
+            --enable NETFILTER_XT_MATCH_RECENT \
+            --enable NETFILTER_XT_MATCH_LIMIT \
+            --enable NETFILTER_XT_MATCH_HASHLIMIT \
+            --enable NETFILTER_XT_MATCH_OWNER \
+            --enable NETFILTER_XT_MATCH_PKTTYPE \
+            --enable NETFILTER_XT_MATCH_MARK \
+            --enable NETFILTER_XT_TARGET_MARK \
+            --enable IP_SET \
+            --enable IP_SET_HASH_IP \
+            --enable IP_SET_HASH_NET \
+            --enable NETFILTER_XT_SET \
+            --enable NETFILTER_NETLINK_QUEUE \
+            --enable NETFILTER_NETLINK_LOG \
+            --enable NETFILTER_XT_TARGET_NFLOG \
+            --enable NET_NS \
             --enable VETH \
             --enable BRIDGE \
             --enable BRIDGE_NETFILTER \
-            --enable NETFILTER \
-            --enable NETFILTER_ADVANCED \
             --enable NF_CONNTRACK \
+            --enable NF_CONNTRACK_NETLINK \
+            --enable NF_NAT \
             --enable IP_NF_IPTABLES \
             --enable IP_NF_FILTER \
             --enable IP_NF_NAT \
-            --enable NF_NAT \
-            --enable NF_TABLES \
             --enable IP_NF_TARGET_MASQUERADE \
             --enable NETFILTER_XT_TARGET_MASQUERADE \
             --enable NETFILTER_XT_TARGET_TCPMSS \
             --enable NETFILTER_XT_MATCH_ADDRTYPE \
-            --enable NF_CONNTRACK_NETLINK \
-            --enable NF_NAT_REDIRECT \
-            --enable IP_ADVANCED_ROUTER \
-            --enable IP_MULTIPLE_TABLES \
-            --disable ANDROID_PARANOID_NETWORK
+            --enable NF_TABLES \
+            --enable USER_NS
 
           make \
             O="$OUT" \
             ARCH="$ARCH" \
-            LLVM=1 \
-            LLVM_IAS=0 \
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            NM="$NM" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
+            READELF="$READELF" \
+            OBJSIZE="$OBJSIZE" \
+            STRIP="$STRIP" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CLANG_TRIPLE="$CLANG_TRIPLE" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
             olddefconfig
 
-      # =========================================================
-      # Verify
-      # =========================================================
+      # ==========================================================
+      # Verify configuration
+      # ==========================================================
 
-      - name: Verify config
+      - name: Verify configuration
         run: |
           cd "$GITHUB_WORKSPACE"
 
-          echo "===== Kernel ====="
-          make kernelversion
+          echo "========================================"
+          echo " Kernel version"
+          echo "========================================"
+
+          make \
+            O="$OUT" \
+            ARCH="$ARCH" \
+            kernelversion
 
           echo
-          echo "===== KernelSU ====="
+          echo "========================================"
+          echo " KernelSU"
+          echo "========================================"
+
           grep '^CONFIG_KSU' "$OUT/.config" || true
 
           echo
-          echo "===== Droidspaces ====="
+          echo "========================================"
+          echo " Droidspaces"
+          echo "========================================"
 
-          for C in \
-            NAMESPACES \
-            PID_NS \
-            UTS_NS \
-            IPC_NS \
-            MNT_NS \
-            NET_NS \
-            USER_NS \
-            SECCOMP \
-            SECCOMP_FILTER \
-            CGROUPS \
-            CGROUP_DEVICE \
-            CGROUP_PIDS \
-            MEMCG \
-            CGROUP_SCHED \
-            CGROUP_FREEZER \
-            DEVTMPFS \
-            OVERLAY_FS \
-            VETH \
-            BRIDGE \
-            BRIDGE_NETFILTER \
-            NETFILTER \
-            NF_CONNTRACK
-          do
-            grep -q "^CONFIG_${C}=y" "$OUT/.config" \
-              && echo "OK   CONFIG_${C}=y" \
-              || echo "MISS CONFIG_${C}"
+          REQUIRED_CONFIGS="
+          SYSCTL
+          SYSVIPC
+          POSIX_MQUEUE
+          NAMESPACES
+          PID_NS
+          UTS_NS
+          IPC_NS
+          SECCOMP
+          SECCOMP_FILTER
+          CGROUPS
+          CGROUP_DEVICE
+          CGROUP_PIDS
+          MEMCG
+          CGROUP_SCHED
+          FAIR_GROUP_SCHED
+          CGROUP_FREEZER
+          CGROUP_NET_PRIO
+          DEVTMPFS
+          OVERLAY_FS
+          TMPFS_POSIX_ACL
+          TMPFS_XATTR
+          NETFILTER_XT_MATCH_CONNTRACK
+          NETFILTER_XT_MATCH_MULTIPORT
+          NETFILTER_XT_TARGET_REJECT
+          NETFILTER_XT_MATCH_RECENT
+          IP_SET
+          NETFILTER_XT_SET
+          NET_NS
+          VETH
+          BRIDGE
+          BRIDGE_NETFILTER
+          NF_CONNTRACK
+          NF_NAT
+          IP_NF_IPTABLES
+          IP_NF_NAT
+          USER_NS
+          "
+
+          FAILED=0
+
+          for CONFIG in $REQUIRED_CONFIGS; do
+            if grep -q "^CONFIG_${CONFIG}=y" "$OUT/.config"; then
+              echo "OK   CONFIG_${CONFIG}=y"
+            else
+              echo "MISS CONFIG_${CONFIG}"
+              FAILED=1
+            fi
           done
 
-      # =========================================================
-      # Build
-      # =========================================================
+          if [ "$FAILED" -ne 0 ]; then
+            echo
+            echo "ERROR: Required Droidspaces configuration is missing."
+            exit 1
+          fi
+
+      # ==========================================================
+      # Build kernel
+      # ==========================================================
 
       - name: Build kernel
         run: |
           cd "$GITHUB_WORKSPACE"
 
-          export PATH="$RUNNER_TEMP/clang/clang-r416183b/bin:$PATH"
-
           make -j"$(nproc)" \
             O="$OUT" \
-            ARCH=arm64 \
-            LLVM=1 \
-            LLVM_IAS=0 \
+            ARCH="$ARCH" \
+            CC="$CC" \
+            LD="$LD" \
+            AR="$AR" \
+            NM="$NM" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
+            READELF="$READELF" \
+            OBJSIZE="$OBJSIZE" \
+            STRIP="$STRIP" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CLANG_TRIPLE="$CLANG_TRIPLE" \
+            LLVM="$LLVM" \
+            LLVM_IAS="$LLVM_IAS" \
+            Image \
             Image.gz \
             dtbs \
             modules
 
+          test -f "$OUT/arch/arm64/boot/Image"
           test -f "$OUT/arch/arm64/boot/Image.gz"
 
-      # =========================================================
-      # Download official images
-      # =========================================================
+      # ==========================================================
+      # Download official LineageOS 20260826 images
+      # ==========================================================
 
-      - name: Download images
+      - name: Download LineageOS images
         run: |
           mkdir -p "$RUNNER_TEMP/stock"
 
@@ -255,9 +454,11 @@ jobs:
           curl -fL "$MANIFEST_URL" \
             -o "$RUNNER_TEMP/stock/build-manifest.xml"
 
-      # =========================================================
-      # magiskboot
-      # =========================================================
+          ls -lh "$RUNNER_TEMP/stock"
+
+      # ==========================================================
+      # Magiskboot
+      # ==========================================================
 
       - name: Get magiskboot
         run: |
@@ -279,11 +480,13 @@ jobs:
           chmod +x \
             "$RUNNER_TEMP/magisk/magiskboot"
 
-      # =========================================================
-      # Repack boot
-      # =========================================================
+          "$RUNNER_TEMP/magisk/magiskboot" --help >/dev/null
 
-      - name: Repack boot
+      # ==========================================================
+      # Unpack / replace kernel / repack boot
+      # ==========================================================
+
+      - name: Repack boot.img
         run: |
           mkdir -p "$RUNNER_TEMP/boot"
 
@@ -308,76 +511,101 @@ jobs:
 
           test -f violet-droidspaces-ksu.img
 
-      # =========================================================
-      # Release files
-      # =========================================================
+          ls -lh violet-droidspaces-ksu.img
 
-      - name: Prepare release
+      # ==========================================================
+      # Prepare release
+      # ==========================================================
+
+      - name: Prepare release files
         run: |
           mkdir -p "$RUNNER_TEMP/release"
 
-          cp "$RUNNER_TEMP/boot/violet-droidspaces-ksu.img" \
+          cp \
+            "$RUNNER_TEMP/boot/violet-droidspaces-ksu.img" \
             "$RUNNER_TEMP/release/"
 
-          cp "$OUT/arch/arm64/boot/Image.gz" \
+          cp \
+            "$OUT/arch/arm64/boot/Image.gz" \
             "$RUNNER_TEMP/release/"
 
-          cp "$RUNNER_TEMP/stock/dtbo.img" \
+          cp \
+            "$OUT/arch/arm64/boot/Image" \
+            "$RUNNER_TEMP/release/"
+
+          cp \
+            "$RUNNER_TEMP/stock/dtbo.img" \
             "$RUNNER_TEMP/release/dtbo-stock.img"
 
-          cp "$RUNNER_TEMP/stock/recovery.img" \
+          cp \
+            "$RUNNER_TEMP/stock/recovery.img" \
             "$RUNNER_TEMP/release/recovery-stock.img"
 
-          cp "$RUNNER_TEMP/stock/super_empty.img" \
+          cp \
+            "$RUNNER_TEMP/stock/super_empty.img" \
             "$RUNNER_TEMP/release/super_empty-stock.img"
 
-          cp "$RUNNER_TEMP/stock/vbmeta.img" \
+          cp \
+            "$RUNNER_TEMP/stock/vbmeta.img" \
             "$RUNNER_TEMP/release/vbmeta-stock.img"
 
-          cp "$RUNNER_TEMP/stock/build-manifest.xml" \
-            "$RUNNER_TEMP/release/"
+          cp \
+            "$RUNNER_TEMP/stock/build-manifest.xml" \
+            "$RUNNER_TEMP/release/build-manifest.xml"
 
-          cp "$OUT/.config" \
+          cp \
+            "$OUT/.config" \
             "$RUNNER_TEMP/release/kernel.config"
 
           cat > "$RUNNER_TEMP/release/build-info.txt" <<EOF
-          Device: Redmi Note 7 Pro
+          Device: Xiaomi Redmi Note 7 Pro
           Codename: violet
           ROM: LineageOS 23.2
           ROM build: 20260826
-          Kernel: 4.14.357
+          Kernel: 4.14
+          Defconfig: vendor/sdmsteppe-perf_defconfig
           Droidspaces: enabled
           KernelSU-Next: enabled
           SUSFS: disabled
+          Toolchain: clang-r383902
           EOF
 
           cd "$RUNNER_TEMP/release"
+
           sha256sum * > sha256sum.txt
 
-      # =========================================================
+          echo
+          echo "========== RELEASE FILES =========="
+          ls -lah
+
+      # ==========================================================
       # Artifact
-      # =========================================================
+      # ==========================================================
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: violet-droidspaces-ksu
-          path: ${{ runner.temp }}/release/
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 30
 
-      # =========================================================
-      # Release
-      # =========================================================
+      # ==========================================================
+      # GitHub Release
+      # ==========================================================
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "droidspaces-${{ github.run_number }}"
-          name: "Violet Droidspaces + KernelSU-Next ${{ github.run_number }}"
+          name: "Redmi Note 7 Pro Droidspaces + KernelSU-Next ${{ github.run_number }}"
           prerelease: true
           generate_release_notes: true
+
           files: |
             ${{ runner.temp }}/release/violet-droidspaces-ksu.img
             ${{ runner.temp }}/release/Image.gz
+            ${{ runner.temp }}/release/Image
             ${{ runner.temp }}/release/dtbo-stock.img
             ${{ runner.temp }}/release/recovery-stock.img
             ${{ runner.temp }}/release/super_empty-stock.img
