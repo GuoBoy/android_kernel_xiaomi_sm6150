@@ -58,12 +58,14 @@ jobs:
           echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      # ========== 修复mkbootimg编译，增加-Wno-error ==========
-      - name: Build mkbootimg / unpackbootimg tools
+      # ========== 替换为Python版mkbootimg，无需编译 ==========
+      - name: Get python mkbootimg / unpackbootimg (no compile)
         run: |
-          git clone https://github.com/osm0sis/mkbootimg.git mkboot --depth=1
+          mkdir mkboot
           cd mkboot
-          make CFLAGS="-ffunction-sections -O3 -Wno-error"
+          wget https://raw.githubusercontent.com/android/platform_system_core/android-11.0.0_r47/mkbootimg/mkbootimg.py -O mkbootimg
+          wget https://raw.githubusercontent.com/android/platform_system_core/android-11.0.0_r47/mkbootimg/unpackbootimg.py -O unpackbootimg
+          chmod +x mkbootimg unpackbootimg
           echo "BOOT_TOOLS=$PWD" >> $GITHUB_ENV
 
       - name: Download official stock boot.img
