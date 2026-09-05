@@ -169,7 +169,7 @@ jobs:
           make O="$OUT" ARCH="$ARCH" "$DEFCONFIG"
           test -f "$OUT/.config"
 
-      - name: Enable KernelSU and Droidspaces
+      - name: Enable KernelSU, Droidspaces, and disable stack protector
         run: |
           set -eux
           cd "$GITHUB_WORKSPACE"
@@ -235,6 +235,16 @@ jobs:
             --enable IP_MULTIPLE_TABLES
           ./scripts/config --file "$OUT/.config" \
             --disable ANDROID_PARANOID_NETWORK || true
+
+          # 修正：禁用 stack protector strong，因为 Clang 不支持
+          echo
+          echo "========================================"
+          echo " Disable stack protector strong"
+          echo "========================================"
+          ./scripts/config --file "$OUT/.config" \
+            --disable CC_STACKPROTECTOR_STRONG \
+            --enable CC_STACKPROTECTOR_NONE
+
           echo
           echo "========================================"
           echo " Running olddefconfig"
