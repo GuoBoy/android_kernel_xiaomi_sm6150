@@ -287,34 +287,37 @@ jobs:
           ls -lh "$RUNNER_TEMP/images"
 
       # ============================================================
-      # 使用 Android Image Kitchen 替换内核并重新打包
+      # 使用 magiskboot 替换内核并重新打包
       # ============================================================
-      - name: Get Android Image Kitchen
+      - name: Get magiskboot
         run: |
-          git clone --depth=1 https://github.com/osm0sis/Android-Image-Kitchen.git "$RUNNER_TEMP/AIK"
-          chmod +x "$RUNNER_TEMP/AIK/unpackimg.sh" "$RUNNER_TEMP/AIK/repackimg.sh"
-          echo "AIK=$RUNNER_TEMP/AIK" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/magisk"
+          curl -L -o "$RUNNER_TEMP/magisk/Magisk.apk" \
+            https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk
+          unzip -j "$RUNNER_TEMP/magisk/Magisk.apk" 'lib/x86_64/libmagiskboot.so' -d "$RUNNER_TEMP/magisk"
+          mv "$RUNNER_TEMP/magisk/libmagiskboot.so" "$RUNNER_TEMP/magisk/magiskboot"
+          chmod +x "$RUNNER_TEMP/magisk/magiskboot"
+          echo "MAGISKBOOT=$RUNNER_TEMP/magisk/magiskboot" >> "$GITHUB_ENV"
 
-      - name: Unpack stock boot.img
+      - name: Unpack stock boot.img with magiskboot
         run: |
-          cd "$AIK"
-          rm -rf split_img ramdisk boot.img image-new.img
-          cp "$RUNNER_TEMP/images/boot.img" boot.img
-          ./unpackimg.sh -i boot.img
-          test -d split_img
-          test -f split_img/boot.img-kernel
+          cd "$RUNNER_TEMP"
+          mkdir -p boot_work
+          cp "$RUNNER_TEMP/images/boot.img" boot_work/boot.img
+          cd boot_work
+          "$MAGISKBOOT" unpack boot.img
+          test -f kernel
 
       - name: Replace kernel with compiled Image.gz
         run: |
-          cp "$OUT/arch/arm64/boot/Image.gz" "$AIK/split_img/boot.img-kernel"
-          test -f "$AIK/split_img/boot.img-kernel"
+          cp "$OUT/arch/arm64/boot/Image.gz" "$RUNNER_TEMP/boot_work/kernel"
+          test -f "$RUNNER_TEMP/boot_work/kernel"
 
-      - name: Repack boot.img
+      - name: Repack boot.img with magiskboot
         run: |
-          cd "$AIK"
-          ./repackimg.sh
-          test -f image-new.img
-          cp image-new.img "$GITHUB_WORKSPACE/boot-droidspaces.img"
+          cd "$RUNNER_TEMP/boot_work"
+          "$MAGISKBOOT" repack boot.img new-boot.img
+          cp new-boot.img "$GITHUB_WORKSPACE/boot-droidspaces.img"
 
       # ============================================================
       # 生成校验和和发布文件
