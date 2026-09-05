@@ -58,11 +58,12 @@ jobs:
           echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
+      # ========== 修复mkbootimg编译，增加-Wno-error ==========
       - name: Build mkbootimg / unpackbootimg tools
         run: |
           git clone https://github.com/osm0sis/mkbootimg.git mkboot --depth=1
           cd mkboot
-          make
+          make CFLAGS="-ffunction-sections -O3 -Wno-error"
           echo "BOOT_TOOLS=$PWD" >> $GITHUB_ENV
 
       - name: Download official stock boot.img
