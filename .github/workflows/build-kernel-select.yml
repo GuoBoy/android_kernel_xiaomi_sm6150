@@ -1,50 +1,444 @@
-- name: Setup GCC toolchain
+name: Build Violet Droidspaces KSU
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      DEFCONFIG: vendor/sdmsteppe-perf_defconfig
+      OUT: ${{ github.workspace }}/out
+
+      BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
+      DTBO_URL: https://mirrorbits.lineageos.org/full/violet/20260826/dtbo.img
+      RECOVERY_URL: https://mirrorbits.lineageos.org/full/violet/20260826/recovery.img
+      SUPER_EMPTY_URL: https://mirrorbits.lineageos.org/full/violet/20260826/super_empty.img
+      VBMETA_URL: https://mirrorbits.lineageos.org/full/violet/20260826/vbmeta.img
+      MANIFEST_URL: https://mirrorbits.lineageos.org/full/violet/20260826/build-manifest.xml
+
+    steps:
+
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install dependencies
         run: |
-          git clone --depth=1 \
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            ccache \
+            cpio \
+            flex \
+            git \
+            libelf-dev \
+            libssl-dev \
+            python3 \
+            unzip \
+            wget \
+            curl \
+            zip \
+            xz-utils
+
+      # ==========================================================
+      # Android Clang clang-r416183b
+      # ==========================================================
+
+      - name: Setup Clang
+        run: |
+          mkdir -p "$RUNNER_TEMP/clang"
+
+          git clone \
+            --depth=1 \
+            --branch android12-release \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            "$RUNNER_TEMP/clang"
+
+          test -d "$RUNNER_TEMP/clang/clang-r416183b/bin"
+
+          echo "$RUNNER_TEMP/clang/clang-r416183b/bin" >> "$GITHUB_PATH"
+
+          clang --version
+
+      # ==========================================================
+      # GCC 4.9 AArch64
+      # ==========================================================
+
+      - name: Setup AArch64 GCC
+        run: |
+          git clone \
+            --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
             "$RUNNER_TEMP/gcc64"
 
-          git clone --depth=1 \
+          echo "$RUNNER_TEMP/gcc64/bin" >> "$GITHUB_PATH"
+
+          test -x "$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-gcc"
+
+          "$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-gcc" --version
+
+      # ==========================================================
+      # GCC 4.9 ARM32
+      # ==========================================================
+
+      - name: Setup ARM32 GCC
+        run: |
+          git clone \
+            --depth=1 \
             https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
             "$RUNNER_TEMP/gcc32"
 
-          echo "$RUNNER_TEMP/gcc64/bin" >> "$GITHUB_PATH"
           echo "$RUNNER_TEMP/gcc32/bin" >> "$GITHUB_PATH"
 
-          aarch64-linux-android-gcc --version
-          arm-linux-androideabi-gcc --version
+          test -x "$RUNNER_TEMP/gcc32/bin/arm-linux-androideabi-gcc"
+
+          "$RUNNER_TEMP/gcc32/bin/arm-linux-androideabi-gcc" --version
+
+      # ==========================================================
+      # KernelSU-Next
+      # ==========================================================
+
+      - name: Add KernelSU-Next
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            | bash -
+
+      # ==========================================================
+      # Defconfig
+      # ==========================================================
+
+      - name: Generate defconfig
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          rm -rf "$OUT"
+
+          make \
+            O="$OUT" \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-" \
+            CROSS_COMPILE_ARM32="$RUNNER_TEMP/gcc32/bin/arm-linux-androideabi-" \
+            LLVM=1 \
+            LLVM_IAS=0 \
+            "$DEFCONFIG"
+
+      # ==========================================================
+      # Droidspaces config
+      # ==========================================================
+
+      - name: Configure Droidspaces
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          CONFIG="$OUT/.config"
+
+          ./scripts/config --file "$CONFIG" \
+            --enable SYSCTL \
+            --enable SYSVIPC \
+            --enable POSIX_MQUEUE \
+            --enable NAMESPACES \
+            --enable PID_NS \
+            --enable UTS_NS \
+            --enable IPC_NS \
+            --enable MNT_NS \
+            --enable NET_NS \
+            --enable USER_NS \
+            --enable SECCOMP \
+            --enable SECCOMP_FILTER \
+            --enable CGROUPS \
+            --enable CGROUP_DEVICE \
+            --enable CGROUP_PIDS \
+            --enable MEMCG \
+            --enable CGROUP_SCHED \
+            --enable FAIR_GROUP_SCHED \
+            --enable CGROUP_FREEZER \
+            --enable CGROUP_NET_PRIO \
+            --enable DEVTMPFS \
+            --enable OVERLAY_FS \
+            --enable TMPFS_POSIX_ACL \
+            --enable TMPFS_XATTR \
+            --enable VETH \
+            --enable BRIDGE \
+            --enable BRIDGE_NETFILTER \
+            --enable NETFILTER \
+            --enable NETFILTER_ADVANCED \
+            --enable NF_CONNTRACK \
+            --enable IP_NF_IPTABLES \
+            --enable IP_NF_FILTER \
+            --enable IP_NF_NAT \
+            --enable NF_NAT \
+            --enable NF_TABLES \
+            --enable IP_NF_TARGET_MASQUERADE \
+            --enable NETFILTER_XT_TARGET_MASQUERADE \
+            --enable NETFILTER_XT_TARGET_TCPMSS \
+            --enable NETFILTER_XT_MATCH_ADDRTYPE \
+            --enable NF_CONNTRACK_NETLINK \
+            --enable NF_NAT_REDIRECT \
+            --enable IP_ADVANCED_ROUTER \
+            --enable IP_MULTIPLE_TABLES \
+            --disable ANDROID_PARANOID_NETWORK
+
+          make \
+            O="$OUT" \
+            ARCH="$ARCH" \
+            CROSS_COMPILE="$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-" \
+            CROSS_COMPILE_ARM32="$RUNNER_TEMP/gcc32/bin/arm-linux-androideabi-" \
+            LLVM=1 \
+            LLVM_IAS=0 \
+            olddefconfig
+
+      # ==========================================================
+      # Verify
+      # ==========================================================
+
+      - name: Verify configuration
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          echo "========== Kernel =========="
+          make kernelversion
+
+          echo
+          echo "========== KernelSU =========="
+          grep '^CONFIG_KSU' "$OUT/.config" || true
+
+          echo
+          echo "========== Droidspaces =========="
+
+          for CONFIG in \
+            NAMESPACES \
+            PID_NS \
+            UTS_NS \
+            IPC_NS \
+            MNT_NS \
+            NET_NS \
+            USER_NS \
+            SECCOMP \
+            SECCOMP_FILTER \
+            CGROUPS \
+            CGROUP_DEVICE \
+            CGROUP_PIDS \
+            MEMCG \
+            CGROUP_SCHED \
+            CGROUP_FREEZER \
+            DEVTMPFS \
+            OVERLAY_FS \
+            VETH \
+            BRIDGE \
+            BRIDGE_NETFILTER \
+            NETFILTER \
+            NF_CONNTRACK
+          do
+            if grep -q "^CONFIG_${CONFIG}=y" "$OUT/.config"; then
+              echo "OK   CONFIG_${CONFIG}=y"
+            else
+              echo "MISS CONFIG_${CONFIG}"
+            fi
+          done
+
+          echo
+          echo "========== Toolchain =========="
+          clang --version
+          "$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-gcc" --version
+
+      # ==========================================================
+      # Build
+      # ==========================================================
 
       - name: Build kernel
         run: |
           cd "$GITHUB_WORKSPACE"
 
-          export PATH="$RUNNER_TEMP/gcc64/bin:$RUNNER_TEMP/gcc32/bin:$PATH"
-
-          export CROSS_COMPILE="$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-"
-          export CROSS_COMPILE_ARM32="$RUNNER_TEMP/gcc32/bin/arm-linux-androideabi-"
-
-          export CLANG_PREBUILT_BIN="$RUNNER_TEMP/clang/clang-r416183b1/bin"
-          export PATH="$CLANG_PREBUILT_BIN:$PATH"
-
-          echo "========== Toolchain =========="
-          clang --version
-          aarch64-linux-android-gcc --version
-
-          echo
-          echo "========== Kernel =========="
-          make kernelversion
-
-          echo
-          echo "========== Build =========="
+          export PATH="$RUNNER_TEMP/clang/clang-r416183b/bin:$RUNNER_TEMP/gcc64/bin:$RUNNER_TEMP/gcc32/bin:$PATH"
 
           make -j"$(nproc)" \
             O="$OUT" \
             ARCH=arm64 \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            CROSS_COMPILE="$RUNNER_TEMP/gcc64/bin/aarch64-linux-android-" \
+            CROSS_COMPILE_ARM32="$RUNNER_TEMP/gcc32/bin/arm-linux-androideabi-" \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             LLVM=1 \
             LLVM_IAS=0 \
             Image.gz \
             dtbs \
             modules
+
+          test -f "$OUT/arch/arm64/boot/Image.gz"
+
+      # ==========================================================
+      # Download stock images
+      # ==========================================================
+
+      - name: Download LineageOS images
+        run: |
+          mkdir -p "$RUNNER_TEMP/stock"
+
+          curl -fL "$BOOT_URL" \
+            -o "$RUNNER_TEMP/stock/boot.img"
+
+          curl -fL "$DTBO_URL" \
+            -o "$RUNNER_TEMP/stock/dtbo.img"
+
+          curl -fL "$RECOVERY_URL" \
+            -o "$RUNNER_TEMP/stock/recovery.img"
+
+          curl -fL "$SUPER_EMPTY_URL" \
+            -o "$RUNNER_TEMP/stock/super_empty.img"
+
+          curl -fL "$VBMETA_URL" \
+            -o "$RUNNER_TEMP/stock/vbmeta.img"
+
+          curl -fL "$MANIFEST_URL" \
+            -o "$RUNNER_TEMP/stock/build-manifest.xml"
+
+          ls -lh "$RUNNER_TEMP/stock"
+
+      # ==========================================================
+      # magiskboot
+      # ==========================================================
+
+      - name: Get magiskboot
+        run: |
+          mkdir -p "$RUNNER_TEMP/magisk"
+
+          curl -fL \
+            https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk \
+            -o "$RUNNER_TEMP/magisk/Magisk.apk"
+
+          unzip -j \
+            "$RUNNER_TEMP/magisk/Magisk.apk" \
+            'lib/x86_64/libmagiskboot.so' \
+            -d "$RUNNER_TEMP/magisk"
+
+          mv \
+            "$RUNNER_TEMP/magisk/libmagiskboot.so" \
+            "$RUNNER_TEMP/magisk/magiskboot"
+
+          chmod +x \
+            "$RUNNER_TEMP/magisk/magiskboot"
+
+      # ==========================================================
+      # Repack boot.img
+      # ==========================================================
+
+      - name: Repack boot.img
+        run: |
+          mkdir -p "$RUNNER_TEMP/boot"
+
+          cp \
+            "$RUNNER_TEMP/stock/boot.img" \
+            "$RUNNER_TEMP/boot/stock-boot.img"
+
+          cd "$RUNNER_TEMP/boot"
+
+          "$RUNNER_TEMP/magisk/magiskboot" \
+            unpack stock-boot.img
+
+          test -f kernel
+
+          cp \
+            "$OUT/arch/arm64/boot/Image.gz" \
+            kernel
+
+          "$RUNNER_TEMP/magisk/magiskboot" \
+            repack stock-boot.img \
+            violet-droidspaces-ksu.img
+
+          test -f violet-droidspaces-ksu.img
+
+      # ==========================================================
+      # Prepare Release
+      # ==========================================================
+
+      - name: Prepare Release
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+
+          cp "$RUNNER_TEMP/boot/violet-droidspaces-ksu.img" \
+            "$RUNNER_TEMP/release/"
+
+          cp "$OUT/arch/arm64/boot/Image.gz" \
+            "$RUNNER_TEMP/release/"
+
+          cp "$RUNNER_TEMP/stock/dtbo.img" \
+            "$RUNNER_TEMP/release/dtbo-stock.img"
+
+          cp "$RUNNER_TEMP/stock/recovery.img" \
+            "$RUNNER_TEMP/release/recovery-stock.img"
+
+          cp "$RUNNER_TEMP/stock/super_empty.img" \
+            "$RUNNER_TEMP/release/super_empty-stock.img"
+
+          cp "$RUNNER_TEMP/stock/vbmeta.img" \
+            "$RUNNER_TEMP/release/vbmeta-stock.img"
+
+          cp "$RUNNER_TEMP/stock/build-manifest.xml" \
+            "$RUNNER_TEMP/release/"
+
+          cp "$OUT/.config" \
+            "$RUNNER_TEMP/release/kernel.config"
+
+          cat > "$RUNNER_TEMP/release/build-info.txt" <<EOF
+          Device: Redmi Note 7 Pro
+          Codename: violet
+          ROM: LineageOS 23.2
+          ROM build: 20260826
+          Kernel: 4.14.357
+          Defconfig: vendor/sdmsteppe-perf_defconfig
+          Droidspaces: enabled
+          KernelSU-Next: enabled
+          SUSFS: disabled
+          EOF
+
+          cd "$RUNNER_TEMP/release"
+
+          sha256sum * > sha256sum.txt
+
+          ls -lah
+
+      # ==========================================================
+      # Artifact
+      # ==========================================================
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: violet-droidspaces-ksu
+          path: ${{ runner.temp }}/release/
+
+      # ==========================================================
+      # GitHub Release
+      # ==========================================================
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "droidspaces-${{ github.run_number }}"
+          name: "Redmi Note 7 Pro Droidspaces + KernelSU-Next ${{ github.run_number }}"
+          prerelease: true
+          generate_release_notes: true
+
+          files: |
+            ${{ runner.temp }}/release/violet-droidspaces-ksu.img
+            ${{ runner.temp }}/release/Image.gz
+            ${{ runner.temp }}/release/dtbo-stock.img
+            ${{ runner.temp }}/release/recovery-stock.img
+            ${{ runner.temp }}/release/super_empty-stock.img
+            ${{ runner.temp }}/release/vbmeta-stock.img
+            ${{ runner.temp }}/release/build-manifest.xml
+            ${{ runner.temp }}/release/kernel.config
+            ${{ runner.temp }}/release/build-info.txt
+            ${{ runner.temp }}/release/sha256sum.txt
