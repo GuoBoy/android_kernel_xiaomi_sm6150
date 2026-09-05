@@ -8,9 +8,6 @@ env:
   ARCH: arm64
   STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
   KERNEL_REPO: ${{ github.repository }}
-  # 加ghproxy加速
-  CLANG_URL: https://mirror.ghproxy.com/https://github.com/kdrag0n/proton-clang/releases/download/13.0.0-20220509/proton-clang-13.0.0-20220509.tar.zst
-  CLANG_DIR: ${{ github.workspace }}/clang
 
 jobs:
   build-variant:
@@ -42,7 +39,7 @@ jobs:
       - name: Setup build dependencies
         run: |
           sudo apt update -y
-          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves python3 python3-pip wget zstd
+          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves python3 python3-pip wget
           git config --global user.name "GithubCI"
           git config --global user.email "ci@github.com"
 
@@ -54,15 +51,12 @@ jobs:
           restore-keys: |
             ${{ github.workflow }}-${{ matrix.variant.name }}-
 
-      # ========== 修复后的Clang下载解压 ==========
-      - name: Download & Extract Proton Clang
+      # ZyC Clang 原生github地址，无镜像
+      - name: Download ZyC Clang
         run: |
-          mkdir -p ${{ env.CLANG_DIR }}
-          wget --retry-connrefused --tries=3 ${{ env.CLANG_URL }} -O proton-clang.tar.zst
-          zstd -d proton-clang.tar.zst
-          tar -xf proton-clang.tar -C ${{ env.CLANG_DIR }}
-          echo "CLANG_PATH=${{ env.CLANG_DIR }}/bin" >> $GITHUB_ENV
-          echo "${{ env.CLANG_DIR }}/bin" >> $GITHUB_PATH
+          git clone --depth=1 https://github.com/ZyCromerZ/Clang clang
+          echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
+          echo "$PWD/clang/bin" >> $GITHUB_PATH
 
       - name: Build mkbootimg / unpackbootimg tools
         run: |
@@ -236,7 +230,7 @@ jobs:
             ## Build Info
             - Device: Redmi Note7 Pro violet SM6150
             - ROM: lineage-23.2
-            - Toolchain: Proton Clang 13
+            - Toolchain: ZyC Clang
             ### Variants
             1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
             2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
