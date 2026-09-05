@@ -2,9 +2,9 @@ name: Build Violet Kernel with KernelSU v0.9.5 + Droidspaces
 
 on:
   workflow_dispatch:
-  # push:
-  #   branches:
-  #     - "**"
+  push:
+    branches:
+      - "**"
 
 permissions:
   contents: write
@@ -133,12 +133,12 @@ jobs:
           fi
 
       # ============================================================
-      # 修复设备树编译错误 (tpdm_west + sm6150-coresight)
+      # 修复设备树编译错误
       # ============================================================
       - name: Fix device tree compilation errors
         run: |
           cd "$GITHUB_WORKSPACE"
-          # 1. 修复 tpdm_west 引用
+          # 1. 修复 tpdm_west 引用（注释掉包含该字符串的行）
           for file in arch/arm64/boot/dts/qcom/*.dtsi; do
             if [ -f "$file" ] && grep -q tpdm_west "$file"; then
               echo "Fixing $file for tpdm_west"
@@ -146,11 +146,10 @@ jobs:
             fi
           done
 
-          # 2. 修复 sm6150-coresight.dtsi 第440行语法错误
+          # 2. 删除 sm6150-coresight.dtsi 第440行（语法错误）
           if [ -f arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi ]; then
-            echo "Fixing sm6150-coresight.dtsi line 440"
-            # 注释掉第440行
-            sed -i '440s/^/\/\* /; 440s/$/ \*\//' arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
+            echo "Deleting line 440 from sm6150-coresight.dtsi"
+            sed -i '440d' arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
           fi
 
       - name: Load defconfig
