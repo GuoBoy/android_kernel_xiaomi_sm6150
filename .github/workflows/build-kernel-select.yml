@@ -2,14 +2,17 @@ name: MultiVariant Kernel Build | SM6150 violet
 on:
   workflow_dispatch:
   push:
-    branches: [ lineage-23.2 ]
 
 env:
   DEFCONFIG: vendor/violet_defconfig
   ARCH: arm64
+  # ⚠️ 确认这个bootimg和你手机ROM版本匹配！不匹配会卡logo
   STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
-  KERNEL_REPO: LineageOS/android_kernel_xiaomi_sm6150
-  KERNEL_BRANCH: lineage-23.2
+  # 使用当前仓库源码，不再硬编码Lineage官方仓库
+  KERNEL_REPO: ${{ github.repository }}
+  # Proton Clang13，4.14内核兼容性优于18
+  CLANG_URL: https://github.com/kdrag0n/proton-clang/releases/download/13.0.0-20220509/proton-clang-13.0.0-20220509.tar.zst
+  CLANG_DIR: ${{ github.workspace }}/clang
 
 jobs:
   build-variant:
@@ -33,17 +36,15 @@ jobs:
             apply_susfs: true
 
     steps:
-      - name: Checkout kernel source ${{ matrix.variant.name }}
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ env.KERNEL_BRANCH }}
-          repository: ${{ env.KERNEL_REPO }}
 
       - name: Setup build dependencies
         run: |
           sudo apt update -y
-          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves python3 python3-pip wget
+          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves python3 python3-pip wget zstd
           git config --global user.name "GithubCI"
           git config --global user.email "ci@github.com"
 
@@ -55,10 +56,13 @@ jobs:
           restore-keys: |
             ${{ github.workflow }}-${{ matrix.variant.name }}-
 
-      - name: Download Lineage Kernel Clang Toolchain
+      - name: Download & Extract Proton Clang
         run: |
-          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel.git clang --depth=1
-          echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
+          mkdir -p ${{ env.CLANG_DIR }}
+          wget --quiet ${{ env.CLANG_URL }} -O proton-clang.tar.zst
+          tar -I zstd -xf proton-clang.tar.zst -C ${{ env.CLANG_DIR }}
+          echo "CLANG_PATH=${{ env.CLANG_DIR }}/bin" >> $GITHUB_ENV
+          echo "${{ env.CLANG_DIR }}/bin" >> $GITHUB_PATH
 
       - name: Build mkbootimg / unpackbootimg tools
         run: |
@@ -70,6 +74,7 @@ jobs:
       - name: Download official stock boot.img
         run: |
           wget -O stock-boot.img ${{ env.STOCK_BOOT_URL }}
+          if [ ! -f stock-boot.img ];then echo "stock bootimg download failed"; exit 1; fi
           ls -la stock-boot.img
 
       - name: Apply Droidspaces Non-GKI patches
@@ -79,7 +84,7 @@ jobs:
           cd droidspaces-src/assets/resources/kernel-patches/non-GKI
           for p in *.patch; do
             echo "Applying Droidspaces patch: $p"
-            git apply --directory=../../../../ $p
+            git apply --verbose --3way --directory=../../../../ $p
           done
           cd ../../../../
 
@@ -96,7 +101,7 @@ jobs:
           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
           for patch in susfs4ksu/kernel_patches/*.patch; do
             echo "Applying SUSFS patch: $patch"
-            git apply "$patch"
+            git apply --verbose --3way "$patch"
           done
 
       - name: Apply kernel config
@@ -153,11 +158,8 @@ jobs:
 
       - name: Compile kernel ${{ matrix.variant.name }}
         run: |
-          export PATH=$PWD/clang/bin:$PATH
-          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
-          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang \
-          CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
+          export PATH=${{ env.CLANG_PATH }}:$PATH
+          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1
 
       - name: Copy kernel image and rename for variant
         run: |
@@ -233,15 +235,16 @@ jobs:
           body: |
             ## Build Info
             - Device: Redmi Note7 Pro violet SM6150
-            - ROM: lineage-23.2-20260826-nightly-violet
-            - Kernel Source: android_kernel_xiaomi_sm6150 lineage-23.2
-
+            - ROM: lineage-23.2
+            - Toolchain: Proton Clang 13
             ### Variants
             1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
             2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
             3. **boot-droidspaces+ksu+susfs.img**: Full Droidspaces+KSU+SUSFS（目标完整版）
 
-            ### Flash example
+            ### Flash Instructions
+            Violet是A/B分区，**必须刷对应slot**
             ```bash
-            fastboot flash boot boot-droidspaces-only.img
+            fastboot flash boot_a boot-xxx.img
+            fastboot flash boot_b boot-xxx.img
             fastboot reboot
