@@ -1,0 +1,295 @@
+name: Selectable Matrix Build | SM6150/violet MultiKernel
+on:
+  workflow_dispatch:
+    inputs:
+      build_droidspaces_only:
+        description: Build droidspaces-only（仅Droidspaces，无KSU/SUSFS）
+        type: boolean
+        default: true
+      build_droidspaces_ksu:
+        description: Build droidspaces+ksu（Droidspaces + KernelSU-Next）
+        type: boolean
+        default: true
+      build_droidspaces_ksu_susfs:
+        description: Build droidspaces+ksu+susfs（完整目标版本）
+        type: boolean
+        default: true
+      build_stock_base:
+        description: Build stock-base（基准原版内核）
+        type: boolean
+        default: false
+
+env:
+  DEFCONFIG: vendor/violet_defconfig
+  ARCH: arm64
+  STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
+  KERNEL_REPO: LineageOS/android_kernel_xiaomi_sm6150
+  KERNEL_BRANCH: lineage-23.2
+
+jobs:
+  generate-matrix:
+    name: Generate build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Create matrix json
+        id: set-matrix
+        run: |
+          python3 - <<END
+          import json
+          variants = []
+          if "${{ github.event.inputs.build_droidspaces_only }}" == "true":
+              variants.append({
+                "name": "droidspaces-only",
+                "apply_droidspaces_patch": True,
+                "apply_ksu": False,
+                "apply_susfs": False
+              })
+          if "${{ github.event.inputs.build_droidspaces_ksu }}" == "true":
+              variants.append({
+                "name": "droidspaces+ksu",
+                "apply_droidspaces_patch": True,
+                "apply_ksu": True,
+                "apply_susfs": False
+              })
+          if "${{ github.event.inputs.build_droidspaces_ksu_susfs }}" == "true":
+              variants.append({
+                "name": "droidspaces+ksu+susfs",
+                "apply_droidspaces_patch": True,
+                "apply_ksu": True,
+                "apply_susfs": True
+              })
+          if "${{ github.event.inputs.build_stock_base }}" == "true":
+              variants.append({
+                "name": "stock-base",
+                "apply_droidspaces_patch": False,
+                "apply_ksu": False,
+                "apply_susfs": False
+              })
+          print(f"matrix={json.dumps(variants)}")
+          END
+
+  build-variant:
+    name: Build ${{ matrix.variant.name }}
+    needs: generate-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.generate-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout kernel source ${{ matrix.variant.name }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.KERNEL_BRANCH }}
+          repository: ${{ env.KERNEL_REPO }}
+
+      - name: Setup build dependencies
+        run: |
+          sudo apt update -y
+          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves python3 python3-pip wget
+          git config --global user.name "GithubCI"
+          git config --global user.email "ci@github.com"
+
+      - name: Cache ccache ${{ matrix.variant.name }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ github.workflow }}-${{ matrix.variant.name }}-${{ github.sha }}
+          restore-keys: |
+            ${{ github.workflow }}-${{ matrix.variant.name }}-
+
+      - name: Download Lineage Kernel Clang Toolchain
+        run: |
+          git clone https://github.com/LineageOS/android_prebuilts_clang_kernel.git clang --depth=1
+          echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
+
+      - name: Build mkbootimg / unpackbootimg tools
+        run: |
+          git clone https://github.com/osm0sis/mkbootimg.git mkboot --depth=1
+          cd mkboot
+          make
+          echo "BOOT_TOOLS=$PWD" >> $GITHUB_ENV
+
+      - name: Download official stock boot.img
+        run: |
+          wget -O stock-boot.img ${{ env.STOCK_BOOT_URL }}
+          ls -la stock-boot.img
+
+      - name: Apply Droidspaces Non-GKI patches
+        if: matrix.variant.apply_droidspaces_patch == true
+        run: |
+          git clone https://github.com/ravindu644/Droidspaces-OSS droidspaces-src --depth=1
+          cd droidspaces-src/assets/resources/kernel-patches/non-GKI
+          for p in *.patch; do
+            echo "Applying Droidspaces patch: $p"
+            git apply --directory=../../../../ $p
+          done
+          cd ../../../../
+
+      - name: Integrate KernelSU-Next legacy
+        if: matrix.variant.apply_ksu == true
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+
+      - name: Apply SUSFS4KSU 4.14 patches
+        if: matrix.variant.apply_susfs == true
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu -b kernel-4.14 --depth=1
+          cp -r susfs4ksu/kernel_patches/fs/* fs/
+          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+          for patch in susfs4ksu/kernel_patches/*.patch; do
+            echo "Applying SUSFS patch: $patch"
+            git apply "$patch"
+          done
+
+      - name: Apply kernel config
+        run: |
+          make O=out ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG }}
+          ./scripts/config --file out/.config \
+          -e KPROBES \
+          -e KPROBE_EVENTS \
+          -e BPF \
+          -e BPF_SYSCALL \
+          -e KALLSYMS \
+          -e KALLSYMS_ALL \
+          -e MODULES \
+          -e MODULE_UNLOAD \
+          -e DEBUG_INFO \
+          -e DEBUG_INFO_BTF \
+          -e SYSVIPC \
+          -e IPC_NS \
+          -e PID_NS \
+          -e MOUNT_NS \
+          -e UTS_NS \
+          -e USER_NS \
+          -e NET_NS \
+          -e CGROUPS \
+          -e CGROUP_FREEZER \
+          -e CGROUP_PIDS \
+          -e CGROUP_DEVICES \
+          -e CGROUP_CPUACCT \
+          -e CGROUP_SCHED \
+          -e MEMCG \
+          -e SECCOMP \
+          -e SECCOMP_FILTER \
+          -e DEVTMPFS \
+          -e DEVTMPFS_MOUNT \
+          -e NETFILTER \
+          -e NETFILTER_XTABLES \
+          -e IP_NF_FILTER \
+          -e IP6_NF_FILTER \
+          -d ANDROID_PARANOID_NETWORK
+
+          if [ "${{ matrix.variant.apply_ksu }}" = "true" ]; then
+            ./scripts/config --file out/.config -e KSU
+          fi
+          if [ "${{ matrix.variant.apply_susfs }}" = "true" ]; then
+            ./scripts/config --file out/.config \
+            -e KSU_SUSFS \
+            -e KSU_SUSFS_HAS_MAGIC_MOUNT \
+            -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SPOOF_UNAME \
+            -e KSU_SUSFS_TRY_UMOUNT \
+            -e KSU_SUSFS_SUS_SU
+          fi
+          cp out/.config arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG }}
+
+      - name: Compile kernel ${{ matrix.variant.name }}
+        run: |
+          export PATH=$PWD/clang/bin:$PATH
+          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
+          make -j$(nproc) O=out ARCH=${{ env.ARCH }} CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-
+
+      - name: Copy kernel image and rename for variant
+        run: |
+          cp out/arch/${{ env.ARCH }}/boot/Image.gz-dtb ./Image-${{ matrix.variant.name }}.gz-dtb
+          ls -la Image-${{ matrix.variant.name }}.gz-dtb
+
+      - name: Unpack stock boot.img
+        run: |
+          mkdir boot_unpack
+          ${{ env.BOOT_TOOLS }}/unpackbootimg -i stock-boot.img -o boot_unpack
+
+      - name: Replace kernel and repack boot ${{ matrix.variant.name }}
+        run: |
+          cp Image-${{ matrix.variant.name }}.gz-dtb boot_unpack/stock-boot.img-kernel
+          cd boot_unpack
+          ARGS=(
+            --kernel stock-boot.img-kernel
+            --ramdisk stock-boot.img-ramdisk
+            --cmdline "$(cat stock-boot.img-cmdline)"
+            --base "$(cat stock-boot.img-base)"
+            --pagesize "$(cat stock-boot.img-pagesize)"
+            --kernel_offset "$(cat stock-boot.img-kernel_offset)"
+            --ramdisk_offset "$(cat stock-boot.img-ramdisk_offset)"
+            --tags_offset "$(cat stock-boot.img-tags_offset)"
+            --os_version "$(cat stock-boot.img-os_version)"
+            --os_patch_level "$(cat stock-boot.img-os_patch_level)"
+            --header_version "$(cat stock-boot.img-header_version)"
+          )
+          if [ -f "stock-boot.img-second" ]; then
+            ARGS+=(--second stock-boot.img-second --second_offset "$(cat stock-boot.img-second_offset)")
+          fi
+          ${{ env.BOOT_TOOLS }}/mkbootimg "${ARGS[@]}" -o ../boot-${{ matrix.variant.name }}.img
+          cd ..
+          ls -la boot-${{ matrix.variant.name }}.img
+
+      - name: Generate SHA256 ${{ matrix.variant.name }}
+        run: |
+          sha256sum Image-${{ matrix.variant.name }}.gz-dtb boot-${{ matrix.variant.name }}.img > sha256-${{ matrix.variant.name }}.txt
+
+      - name: Upload per-variant Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.variant.name }}
+          path: |
+            Image-${{ matrix.variant.name }}.gz-dtb
+            boot-${{ matrix.variant.name }}.img
+            sha256-${{ matrix.variant.name }}.txt
+
+  release:
+    name: Create Release (collect selected variants)
+    needs: build-variant
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: List downloaded artifacts
+        run: ls -R ./artifacts
+
+      - name: Collect all files for release
+        run: |
+          mkdir release-files
+          find ./artifacts -type f -exec cp {} ./release-files/ \;
+          ls -la ./release-files
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag_name: violet-select-kernel-$(date +%Y%m%d)
+          name: Select-Build Kernel | SM6150/violet Droidspaces+KSU+SUSFS
+          body: |
+            ## Build Info
+            - Device: Redmi Note7 Pro violet SM6150
+            - ROM: lineage-23.2-20260826-nightly-violet
+            - Kernel Source: android_kernel_xiaomi_sm6150 lineage-23.2
+            > This build only includes variants you selected before run.
+            ## Variants description:
+            1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
+            2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
+            3. **boot-droidspaces+ksu+susfs.img**: Full Droidspaces+KSU+SUSFS（目标完整版）
+            4. **boot-stock-base.img**: Stock kernel with base config only（基准）
+
+            ### Flash command example
+            ```bash
+            fastboot flash boot boot-droidspaces-only.img
+            fastboot reboot
