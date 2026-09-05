@@ -39,7 +39,7 @@ jobs:
       - name: Setup build dependencies
         run: |
           sudo apt update -y
-          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves python3 python3-pip wget
+          sudo apt install -y git ccache build-essential libssl-dev libelf-dev bison flex dwarves curl wget
           git config --global user.name "GithubCI"
           git config --global user.email "ci@github.com"
 
@@ -51,49 +51,62 @@ jobs:
           restore-keys: |
             ${{ github.workflow }}-${{ matrix.variant.name }}-
 
-      # ZyC Clang 原生github地址，无镜像
+      # ZyC Clang，加--no-tags提速
       - name: Download ZyC Clang
         run: |
-          git clone --depth=1 https://github.com/ZyCromerZ/Clang clang
+          git clone --depth=1 --no-tags https://github.com/ZyCromerZ/Clang clang
           echo "CLANG_PATH=$PWD/clang/bin" >> $GITHUB_ENV
           echo "$PWD/clang/bin" >> $GITHUB_PATH
 
-      # ========== 替换为Python版mkbootimg，无需编译 ==========
-      - name: Get python mkbootimg / unpackbootimg (no compile)
+      # ========== MagiskBoot，curl优先，wget备选 双重保险 ==========
+      - name: Get magiskboot binary
         run: |
-          mkdir mkboot
+          mkdir -p mkboot
           cd mkboot
-          wget https://raw.githubusercontent.com/android/platform_system_core/android-11.0.0_r47/mkbootimg/mkbootimg.py -O mkbootimg
-          wget https://raw.githubusercontent.com/android/platform_system_core/android-11.0.0_r47/mkbootimg/unpackbootimg.py -O unpackbootimg
-          chmod +x mkbootimg unpackbootimg
+          if curl -L --fail https://github.com/topjohnwu/Magisk/releases/download/v28.0/magiskboot -o magiskboot; then
+            echo "curl download success"
+          elif wget --no-verbose https://github.com/topjohnwu/Magisk/releases/download/v28.0/magiskboot -O magiskboot; then
+            echo "wget fallback download success"
+          else
+            echo "magiskboot download failed"
+            exit 1
+          fi
+          chmod +x magiskboot
           echo "BOOT_TOOLS=$PWD" >> $GITHUB_ENV
 
       - name: Download official stock boot.img
         run: |
-          wget -O stock-boot.img ${{ env.STOCK_BOOT_URL }}
-          if [ ! -f stock-boot.img ];then echo "stock bootimg download failed"; exit 1; fi
+          if curl -L --fail ${{ env.STOCK_BOOT_URL }} -o stock-boot.img; then
+            echo "stock boot.img curl download success"
+          elif wget --no-verbose ${{ env.STOCK_BOOT_URL }} -O stock-boot.img; then
+            echo "stock boot.img wget fallback success"
+          else
+            echo "stock boot.img download failed"
+            exit 1
+          fi
+          [ -f stock-boot.img ] || { echo "stock-boot.img missing"; exit 1; }
           ls -la stock-boot.img
 
       - name: Apply Droidspaces Non-GKI patches
         if: matrix.variant.apply_droidspaces_patch == true
         run: |
-          git clone https://github.com/ravindu644/Droidspaces-OSS droidspaces-src --depth=1
+          git clone --depth=1 --no-tags https://github.com/ravindu644/Droidspaces-OSS droidspaces-src
           cd droidspaces-src/assets/resources/kernel-patches/non-GKI
           for p in *.patch; do
             echo "Applying Droidspaces patch: $p"
-            git apply --verbose --3way --directory=../../../../ $p
+            git apply --verbose --3way --directory=../../../../ "$p"
           done
           cd ../../../../
 
       - name: Integrate KernelSU-Next legacy
         if: matrix.variant.apply_ksu == true
         run: |
-          curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
+          curl -LSs --fail "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -s legacy
 
       - name: Apply SUSFS4KSU 4.14 patches
         if: matrix.variant.apply_susfs == true
         run: |
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu -b kernel-4.14 --depth=1
+          git clone --depth=1 --no-tags https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu -b kernel-4.14
           cp -r susfs4ksu/kernel_patches/fs/* fs/
           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
           for patch in susfs4ksu/kernel_patches/*.patch; do
@@ -161,35 +174,26 @@ jobs:
       - name: Copy kernel image and rename for variant
         run: |
           cp out/arch/${{ env.ARCH }}/boot/Image.gz-dtb ./Image-${{ matrix.variant.name }}.gz-dtb
+          [ -f Image-${{ matrix.variant.name }}.gz-dtb ] || { echo "Kernel image build failed!"; exit 1; }
           ls -la Image-${{ matrix.variant.name }}.gz-dtb
 
+      # Magiskboot解包
       - name: Unpack stock boot.img
         run: |
+          rm -rf boot_unpack
           mkdir boot_unpack
-          ${{ env.BOOT_TOOLS }}/unpackbootimg -i stock-boot.img -o boot_unpack
+          cd boot_unpack
+          ${{ env.BOOT_TOOLS }}/magiskboot unpack ../stock-boot.img
+          [ -f kernel ] || { echo "unpack failed, no kernel extracted"; exit 1; }
 
+      # 替换kernel，打包新boot
       - name: Replace kernel and repack boot ${{ matrix.variant.name }}
         run: |
-          cp Image-${{ matrix.variant.name }}.gz-dtb boot_unpack/stock-boot.img-kernel
+          cp Image-${{ matrix.variant.name }}.gz-dtb boot_unpack/kernel
           cd boot_unpack
-          ARGS=(
-            --kernel stock-boot.img-kernel
-            --ramdisk stock-boot.img-ramdisk
-            --cmdline "$(cat stock-boot.img-cmdline)"
-            --base "$(cat stock-boot.img-base)"
-            --pagesize "$(cat stock-boot.img-pagesize)"
-            --kernel_offset "$(cat stock-boot.img-kernel_offset)"
-            --ramdisk_offset "$(cat stock-boot.img-ramdisk_offset)"
-            --tags_offset "$(cat stock-boot.img-tags_offset)"
-            --os_version "$(cat stock-boot.img-os_version)"
-            --os_patch_level "$(cat stock-boot.img-os_patch_level)"
-            --header_version "$(cat stock-boot.img-header_version)"
-          )
-          if [ -f "stock-boot.img-second" ]; then
-            ARGS+=(--second stock-boot.img-second --second_offset "$(cat stock-boot.img-second_offset)")
-          fi
-          ${{ env.BOOT_TOOLS }}/mkbootimg "${ARGS[@]}" -o ../boot-${{ matrix.variant.name }}.img
+          ${{ env.BOOT_TOOLS }}/magiskboot repack ../stock-boot.img ../boot-${{ matrix.variant.name }}.img
           cd ..
+          [ -f boot-${{ matrix.variant.name }}.img ] || { echo "repack boot failed"; exit 1; }
           ls -la boot-${{ matrix.variant.name }}.img
 
       - name: Generate SHA256 ${{ matrix.variant.name }}
@@ -220,7 +224,7 @@ jobs:
 
       - name: Collect all files for release
         run: |
-          mkdir release-files
+          mkdir -p release-files
           find ./artifacts -type f -exec cp {} ./release-files/ \;
           ls -la ./release-files
 
@@ -234,6 +238,7 @@ jobs:
             - Device: Redmi Note7 Pro violet SM6150
             - ROM: lineage-23.2
             - Toolchain: ZyC Clang
+            - Boot Tool: MagiskBoot v28.0
             ### Variants
             1. **boot-droidspaces-only.img**: Droidspaces only, no KSU/SUSFS（基础测试）
             2. **boot-droidspaces+ksu.img**: Droidspaces + KernelSU-Next（无SUSFS）
