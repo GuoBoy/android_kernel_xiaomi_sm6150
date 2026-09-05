@@ -472,6 +472,7 @@ jobs:
           IP_MULTIPLE_TABLES
           "
 
+          # 关键修正：初始化 FAILED 为 0
           FAILED=0
 
           for CONFIG in $REQUIRED_CONFIGS; do
