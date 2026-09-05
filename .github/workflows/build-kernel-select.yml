@@ -6,12 +6,10 @@ on:
 env:
   DEFCONFIG: vendor/violet_defconfig
   ARCH: arm64
-  # ⚠️ 确认这个bootimg和你手机ROM版本匹配！不匹配会卡logo
   STOCK_BOOT_URL: https://mirrorbits.lineageos.org/full/violet/20260826/boot.img
-  # 使用当前仓库源码，不再硬编码Lineage官方仓库
   KERNEL_REPO: ${{ github.repository }}
-  # Proton Clang13，4.14内核兼容性优于18
-  CLANG_URL: https://github.com/kdrag0n/proton-clang/releases/download/13.0.0-20220509/proton-clang-13.0.0-20220509.tar.zst
+  # 加ghproxy加速
+  CLANG_URL: https://mirror.ghproxy.com/https://github.com/kdrag0n/proton-clang/releases/download/13.0.0-20220509/proton-clang-13.0.0-20220509.tar.zst
   CLANG_DIR: ${{ github.workspace }}/clang
 
 jobs:
@@ -56,11 +54,13 @@ jobs:
           restore-keys: |
             ${{ github.workflow }}-${{ matrix.variant.name }}-
 
+      # ========== 修复后的Clang下载解压 ==========
       - name: Download & Extract Proton Clang
         run: |
           mkdir -p ${{ env.CLANG_DIR }}
-          wget --quiet ${{ env.CLANG_URL }} -O proton-clang.tar.zst
-          tar -I zstd -xf proton-clang.tar.zst -C ${{ env.CLANG_DIR }}
+          wget --retry-connrefused --tries=3 ${{ env.CLANG_URL }} -O proton-clang.tar.zst
+          zstd -d proton-clang.tar.zst
+          tar -xf proton-clang.tar -C ${{ env.CLANG_DIR }}
           echo "CLANG_PATH=${{ env.CLANG_DIR }}/bin" >> $GITHUB_ENV
           echo "${{ env.CLANG_DIR }}/bin" >> $GITHUB_PATH
 
