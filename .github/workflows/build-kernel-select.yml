@@ -2,9 +2,9 @@ name: Build Violet Kernel with KernelSU v0.9.5 + Droidspaces
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "**"
+  # push:
+  #   branches:
+  #     - "**"
 
 permissions:
   contents: write
@@ -133,7 +133,7 @@ jobs:
           fi
 
       # ============================================================
-      # 修复设备树编译错误
+      # 修复设备树编译错误（清空有问题的 coresight 文件）
       # ============================================================
       - name: Fix device tree compilation errors
         run: |
@@ -146,10 +146,10 @@ jobs:
             fi
           done
 
-          # 2. 彻底禁用 sm6150-coresight.dtsi（注释掉全部内容）
+          # 2. 彻底清空 sm6150-coresight.dtsi（替换为空文件）
           if [ -f arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi ]; then
-            echo "Disabling sm6150-coresight.dtsi by commenting out all lines"
-            sed -i 's/^/\/\* /; s/$/ \*\//' arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
+            echo "Replacing sm6150-coresight.dtsi with empty file"
+            echo "/* empty - Coresight disabled */" > arch/arm64/boot/dts/qcom/sm6150-coresight.dtsi
           fi
 
       - name: Load defconfig
