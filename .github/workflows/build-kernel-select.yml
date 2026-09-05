@@ -1,4 +1,4 @@
-name: Redmi Note 7 Pro KernelSU Droidspaces (Final)
+name: Redmi Note 7 Pro KernelSU Droidspaces (Final Fix)
 
 on:
   push:
@@ -129,7 +129,6 @@ jobs:
           echo "OBJSIZE=llvm-size" >> "$GITHUB_ENV"
           echo "STRIP=llvm-strip" >> "$GITHUB_ENV"
           echo "LLVM=1" >> "$GITHUB_ENV"
-          # 强制使用 Clang 内部汇编器，避免系统 as 的问题
           echo "LLVM_IAS=1" >> "$GITHUB_ENV"
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
@@ -176,12 +175,13 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           echo
           echo "========================================"
-          echo " Enable KernelSU"
+          echo " Enable KernelSU (with legacy and manual hook)"
           echo "========================================"
           ./scripts/config --file "$OUT/.config" \
             --enable KPROBES \
             --enable KPROBE_EVENTS \
             --enable KSU \
+            --enable KSU_LEGACY_NON_GKI \
             --enable KSU_MANUAL_HOOK
           echo
           echo "========================================"
@@ -247,7 +247,7 @@ jobs:
             --disable CC_STACKPROTECTOR_STRONG \
             --enable CC_STACKPROTECTOR_NONE
 
-          # 可选：禁用 bpfilter 避免链接警告（不影响功能）
+          # 禁用 bpfilter 避免链接警告
           ./scripts/config --file "$OUT/.config" \
             --disable BPFILTER || true
 
@@ -274,6 +274,7 @@ jobs:
           grep '^CONFIG_KPROBES=y' "$OUT/.config"
           grep '^CONFIG_KPROBE_EVENTS=y' "$OUT/.config"
           grep '^CONFIG_KSU=y' "$OUT/.config"
+          grep '^CONFIG_KSU_LEGACY_NON_GKI=y' "$OUT/.config" || echo "WARNING: CONFIG_KSU_LEGACY_NON_GKI not found"
           grep '^CONFIG_KSU_MANUAL_HOOK=y' "$OUT/.config" || echo "WARNING: CONFIG_KSU_MANUAL_HOOK not found"
           echo "KernelSU configuration: OK"
           echo
@@ -474,8 +475,9 @@ jobs:
           Matching ROM:
           lineage-23.2-${ROM_BUILD}-nightly-violet
 
-          KernelSU KPROBE hooks:
-          Manual hook enabled (CONFIG_KSU_MANUAL_HOOK)
+          KernelSU configuration:
+          CONFIG_KSU_LEGACY_NON_GKI=y
+          CONFIG_KSU_MANUAL_HOOK=y
           EOF
           cat RELEASE.txt
 
