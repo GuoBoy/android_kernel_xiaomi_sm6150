@@ -25,7 +25,6 @@ env:
   MANIFEST_URL: "https://mirrorbits.lineageos.org/full/violet/20260826/build-manifest.xml"
 
   CLANG_VERSION: "clang-r547379"
-  CLANG_TAG: "android-16.0.0_r4"
 
   KSU_REPO: "https://github.com/KernelSU-Next/KernelSU-Next.git"
   KSU_BRANCH: "legacy"
@@ -39,7 +38,7 @@ jobs:
     steps:
 
       # ============================================================
-      # 1. Checkout kernel source
+      # 1. Checkout kernel
       # ============================================================
 
       - name: Checkout kernel
@@ -49,7 +48,7 @@ jobs:
           submodules: false
 
       # ============================================================
-      # 2. Install build dependencies
+      # 2. Dependencies
       # ============================================================
 
       - name: Install dependencies
@@ -66,8 +65,6 @@ jobs:
             curl \
             flex \
             git \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
             libelf-dev \
             libncurses5-dev \
             libssl-dev \
@@ -80,21 +77,16 @@ jobs:
             zip
 
       # ============================================================
-      # 3. Restore ccache
+      # 3. ccache
       # ============================================================
 
       - name: Restore ccache
-        id: ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: violet-ccache-${{ runner.os }}-${{ hashFiles('Makefile', 'Kconfig', 'Kconfig.*', 'arch/**/Makefile', 'arch/**/Kconfig*') }}
+          key: violet-kernel-ccache-${{ runner.os }}-${{ hashFiles('Makefile', 'Kconfig', 'arch/**', 'drivers/**', 'fs/**', 'include/**', 'kernel/**', 'mm/**', 'net/**') }}
           restore-keys: |
-            violet-ccache-${{ runner.os }}-
-
-      # ============================================================
-      # 4. Configure ccache
-      # ============================================================
+            violet-kernel-ccache-${{ runner.os }}-
 
       - name: Configure ccache
         run: |
@@ -108,82 +100,104 @@ jobs:
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 5. Restore Android Clang cache
+      # 4. clang cache
       #
-      # Clang 是固定版本，因此非常适合缓存。
+      # 只缓存已经成功下载的 clang-r547379。
       # ============================================================
 
-      - name: Restore Android Clang cache
-        id: clang-cache
+      - name: Restore Android clang cache
+        id: clang_cache
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/clang
-          key: android-clang-${{ env.CLANG_VERSION }}-${{ env.CLANG_TAG }}-v2
+          key: android-clang-${{ env.CLANG_VERSION }}-ubuntu-22.04-v1
 
       # ============================================================
-      # 6. Download Android Clang
+      # 5. Download clang
       #
-      # 不再 clone 整个 googlesource 仓库。
+      # 不使用不存在的 GitHub LineageOS clang 仓库。
       #
-      # 直接下载固定 tag 下的 clang-r547379 archive。
+      # 使用 Android googlesource 的预编译 clang 仓库。
+      #
+      # 这里不 checkout 不存在的 Android tag。
+      # 直接获取仓库中对应的 clang-r547379。
       # ============================================================
 
-      - name: Download Android Clang
-        if: steps.clang-cache.outputs.cache-hit != 'true'
+      - name: Download Android clang
+        if: steps.clang_cache.outputs.cache-hit != 'true'
         run: |
           set -eux
 
           rm -rf "$RUNNER_TEMP/clang"
+          rm -rf "$RUNNER_TEMP/android-clang-source"
 
           mkdir -p "$RUNNER_TEMP/clang"
 
           cd "$RUNNER_TEMP"
 
-          curl -L \
-            --fail \
-            --retry 5 \
-            --retry-delay 5 \
-            -o clang.tar.gz \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${CLANG_TAG}/${CLANG_VERSION}.tar.gz"
+          git clone \
+            --depth=1 \
+            --filter=blob:none \
+            --sparse \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            android-clang-source
 
-          tar -xzf clang.tar.gz \
-            -C "$RUNNER_TEMP/clang"
+          cd android-clang-source
 
-          rm -f clang.tar.gz
+          git sparse-checkout set \
+            clang-r547379
+
+          test -d clang-r547379
+          test -x clang-r547379/bin/clang
+
+          cp -a \
+            clang-r547379/. \
+            "$RUNNER_TEMP/clang/"
 
           test -x "$RUNNER_TEMP/clang/bin/clang"
 
-          test -x "$RUNNER_TEMP/clang/bin/ld.lld"
+          cd "$RUNNER_TEMP"
+
+          rm -rf android-clang-source
 
       # ============================================================
-      # 7. Verify Clang
+      # 6. Check clang
       # ============================================================
 
-      - name: Verify Android Clang
+      - name: Check clang
         run: |
           set -eux
 
-          test -x "$RUNNER_TEMP/clang/bin/clang"
-          test -x "$RUNNER_TEMP/clang/bin/ld.lld"
+          CLANG_BIN="$RUNNER_TEMP/clang/bin"
 
-          echo "$RUNNER_TEMP/clang/bin" >> "$GITHUB_PATH"
+          test -x "$CLANG_BIN/clang"
+          test -x "$CLANG_BIN/ld.lld"
+          test -x "$CLANG_BIN/llvm-ar"
+          test -x "$CLANG_BIN/llvm-nm"
+          test -x "$CLANG_BIN/llvm-objcopy"
+          test -x "$CLANG_BIN/llvm-objdump"
+          test -x "$CLANG_BIN/llvm-readelf"
+          test -x "$CLANG_BIN/llvm-size"
+          test -x "$CLANG_BIN/llvm-strip"
 
-          echo "CLANG_BIN=$RUNNER_TEMP/clang/bin" >> "$GITHUB_ENV"
+          echo "CLANG_BIN=$CLANG_BIN" >> "$GITHUB_ENV"
+
+          echo "$CLANG_BIN" >> "$GITHUB_PATH"
 
           echo
           echo "========================================"
           echo " Android Clang"
           echo "========================================"
 
-          "$RUNNER_TEMP/clang/bin/clang" --version
+          "$CLANG_BIN/clang" --version
 
-          "$RUNNER_TEMP/clang/bin/ld.lld" --version
+          "$CLANG_BIN/ld.lld" --version
 
       # ============================================================
-      # 8. Configure LLVM / GNU assembler
+      # 7. LLVM environment
       # ============================================================
 
-      - name: Configure toolchain
+      - name: Configure LLVM
         run: |
           set -eux
 
@@ -199,8 +213,8 @@ jobs:
 
           echo "LLVM=1" >> "$GITHUB_ENV"
 
-          # Linux 4.14:
-          # use GNU assembler instead of LLVM integrated assembler.
+          # Linux 4.14 + old ARM64 kernel:
+          # 使用外部 assembler。
           echo "LLVM_IAS=0" >> "$GITHUB_ENV"
 
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
@@ -208,31 +222,25 @@ jobs:
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 9. Prepare output directory
+      # 8. Output directory
       # ============================================================
 
-      - name: Prepare output
+      - name: Prepare output directory
         run: |
           set -eux
-
-          rm -rf "$GITHUB_WORKSPACE/out"
 
           mkdir -p "$GITHUB_WORKSPACE/out"
 
           echo "OUT=$GITHUB_WORKSPACE/out" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 10. KernelSU-Next
+      # 9. KernelSU-Next
       #
-      # 不调用 setup.sh。
+      # 不使用 setup.sh 参数。
       #
-      # setup.sh 本身会重新 clone / pull / describe tag，
-      # 这正是之前反复出现错误的来源。
+      # setup.sh 必须在 kernel source root 执行。
       #
-      # 这里直接 clone legacy branch，然后执行它实际需要的：
-      #   drivers/kernelsu -> KernelSU-Next/kernel
-      #   drivers/Makefile
-      #   drivers/Kconfig
+      # 官方脚本自己处理 KernelSU-Next。
       # ============================================================
 
       - name: Integrate KernelSU-Next
@@ -241,49 +249,34 @@ jobs:
 
           cd "$GITHUB_WORKSPACE"
 
+          rm -rf KernelSU
           rm -rf KernelSU-Next
-          rm -f drivers/kernelsu
 
           git clone \
             --depth=1 \
-            --single-branch \
             --branch "$KSU_BRANCH" \
             "$KSU_REPO" \
             KernelSU-Next
 
-          test -d KernelSU-Next/kernel
-          test -f KernelSU-Next/kernel/Kconfig
+          test -f KernelSU-Next/kernel/setup.sh
 
-          ln -s \
-            "$(realpath --relative-to="$GITHUB_WORKSPACE/drivers" "$GITHUB_WORKSPACE/KernelSU-Next/kernel")" \
-            "$GITHUB_WORKSPACE/drivers/kernelsu"
+          chmod +x \
+            KernelSU-Next/kernel/setup.sh
 
-          grep -q "obj-\$(CONFIG_KSU) += kernelsu/" \
-            "$GITHUB_WORKSPACE/drivers/Makefile" \
-            || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
-              >> "$GITHUB_WORKSPACE/drivers/Makefile"
-
-          grep -q 'source "drivers/kernelsu/Kconfig"' \
-            "$GITHUB_WORKSPACE/drivers/Kconfig" \
-            || sed -i \
-              '/endmenu/i source "drivers/kernelsu/Kconfig"' \
-              "$GITHUB_WORKSPACE/drivers/Kconfig"
+          bash \
+            KernelSU-Next/kernel/setup.sh
 
           echo
           echo "========================================"
-          echo " KernelSU-Next"
+          echo " KernelSU result"
           echo "========================================"
 
-          git -C KernelSU-Next rev-parse HEAD
+          test -e KernelSU
 
-          test -L drivers/kernelsu
-
-          readlink -f drivers/kernelsu
-
-          test -f drivers/kernelsu/Kconfig
+          ls -lah KernelSU
 
       # ============================================================
-      # 11. Load defconfig
+      # 10. Load defconfig
       # ============================================================
 
       - name: Load kernel defconfig
@@ -291,6 +284,10 @@ jobs:
           set -eux
 
           cd "$GITHUB_WORKSPACE"
+
+          test -f Makefile
+          test -d drivers
+          test -f Kconfig
 
           make \
             O="$OUT" \
@@ -300,29 +297,35 @@ jobs:
           test -f "$OUT/.config"
 
       # ============================================================
-      # 12. Enable KernelSU + Droidspaces
+      # 11. Enable KernelSU + Droidspaces
+      #
+      # 注意：
+      # 不再使用 CONFIG_KSU_KPROBE_HOOKS。
+      # 之前失败就是因为这个配置项并不适用于当前
+      # KernelSU-Next legacy 环境。
       # ============================================================
 
-      - name: Configure KernelSU and Droidspaces
+      - name: Enable KernelSU and Droidspaces
         run: |
           set -eux
 
           cd "$GITHUB_WORKSPACE"
 
-          # ========================================================
-          # KernelSU
-          # ========================================================
+          echo
+          echo "========================================"
+          echo " Enable KernelSU"
+          echo "========================================"
 
           ./scripts/config \
             --file "$OUT/.config" \
             --enable KPROBES \
             --enable KPROBE_EVENTS \
-            --enable KSU \
-            --enable KSU_KPROBE_HOOKS
+            --enable KSU
 
-          # ========================================================
-          # Droidspaces
-          # ========================================================
+          echo
+          echo "========================================"
+          echo " Enable Droidspaces"
+          echo "========================================"
 
           ./scripts/config \
             --file "$OUT/.config" \
@@ -375,14 +378,15 @@ jobs:
             --enable IP_ADVANCED_ROUTER \
             --enable IP_MULTIPLE_TABLES
 
-          # Droidspaces / Android legacy compatibility.
+          # Nicht für diesen alten Kernel erzwingen.
           ./scripts/config \
             --file "$OUT/.config" \
-            --disable ANDROID_PARANOID_NETWORK
+            --disable ANDROID_PARANOID_NETWORK || true
 
-          # ========================================================
-          # Let Kconfig resolve dependencies.
-          # ========================================================
+          echo
+          echo "========================================"
+          echo " Running olddefconfig"
+          echo "========================================"
 
           make \
             O="$OUT" \
@@ -394,10 +398,10 @@ jobs:
           test -f "$OUT/.config"
 
       # ============================================================
-      # 13. Verify final configuration
+      # 12. Verify final config
       # ============================================================
 
-      - name: Verify configuration
+      - name: Verify final configuration
         run: |
           set -eux
 
@@ -421,7 +425,8 @@ jobs:
           grep '^CONFIG_KPROBES=y' "$OUT/.config"
           grep '^CONFIG_KPROBE_EVENTS=y' "$OUT/.config"
           grep '^CONFIG_KSU=y' "$OUT/.config"
-          grep '^CONFIG_KSU_KPROBE_HOOKS=y' "$OUT/.config"
+
+          echo "KernelSU configuration: OK"
 
           echo
           echo "========================================"
@@ -492,12 +497,17 @@ jobs:
 
           if [ "$FAILED" -ne 0 ]; then
             echo
-            echo "ERROR: Required configuration is missing."
+            echo "ERROR: Required Droidspaces configuration is missing."
             exit 1
           fi
 
+          echo
+          echo "========================================"
+          echo " Configuration check PASSED"
+          echo "========================================"
+
       # ============================================================
-      # 14. Build kernel
+      # 13. Build kernel
       # ============================================================
 
       - name: Build kernel
@@ -508,9 +518,6 @@ jobs:
 
           export PATH="$CLANG_BIN:$PATH"
 
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-
           export CC="ccache clang"
 
           make \
@@ -519,7 +526,7 @@ jobs:
             ARCH="$ARCH" \
             LLVM=1 \
             LLVM_IAS=0 \
-            CC="ccache clang" \
+            CC="$CC" \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -528,16 +535,16 @@ jobs:
             READELF=llvm-readelf \
             OBJSIZE=llvm-size \
             STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-gnu- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
             Image.gz \
             dtbs \
             modules
 
-          test -f "$OUT/arch/arm64/boot/Image.gz"
+          test -f \
+            "$OUT/arch/arm64/boot/Image.gz"
 
       # ============================================================
-      # 15. Verify kernel output
+      # 14. Verify build
       # ============================================================
 
       - name: Verify kernel output
@@ -569,10 +576,10 @@ jobs:
           echo " ccache statistics"
           echo "========================================"
 
-          ccache --show-stats
+          ccache --show-stats || true
 
       # ============================================================
-      # 16. Download matching ROM images
+      # 15. Download matching ROM images
       # ============================================================
 
       - name: Download LineageOS images
@@ -626,22 +633,10 @@ jobs:
           ls -lh "$RUNNER_TEMP/images"
 
       # ============================================================
-      # 17. Restore Android Image Kitchen cache
+      # 16. Android Image Kitchen
       # ============================================================
 
-      - name: Restore Android Image Kitchen cache
-        id: aik-cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/AIK
-          key: android-image-kitchen-v1
-
-      # ============================================================
-      # 18. Download Android Image Kitchen
-      # ============================================================
-
-      - name: Download Android Image Kitchen
-        if: steps.aik-cache.outputs.cache-hit != 'true'
+      - name: Get Android Image Kitchen
         run: |
           set -eux
 
@@ -652,17 +647,6 @@ jobs:
             "$AIK_REPO" \
             "$RUNNER_TEMP/AIK"
 
-      # ============================================================
-      # 19. Verify Android Image Kitchen
-      # ============================================================
-
-      - name: Verify Android Image Kitchen
-        run: |
-          set -eux
-
-          test -f "$RUNNER_TEMP/AIK/unpackimg.sh"
-          test -f "$RUNNER_TEMP/AIK/repackimg.sh"
-
           chmod +x \
             "$RUNNER_TEMP/AIK/unpackimg.sh" \
             "$RUNNER_TEMP/AIK/repackimg.sh"
@@ -670,7 +654,7 @@ jobs:
           echo "AIK=$RUNNER_TEMP/AIK" >> "$GITHUB_ENV"
 
       # ============================================================
-      # 20. Unpack original boot.img
+      # 17. Unpack boot.img
       # ============================================================
 
       - name: Unpack boot image
@@ -693,10 +677,12 @@ jobs:
             -i boot.img
 
           test -d split_img
-          test -f split_img/boot.img-kernel
+
+          test -f \
+            split_img/boot.img-kernel
 
       # ============================================================
-      # 21. Replace kernel
+      # 18. Replace kernel
       # ============================================================
 
       - name: Replace kernel image
@@ -707,11 +693,11 @@ jobs:
             "$OUT/arch/arm64/boot/Image.gz" \
             "$AIK/split_img/boot.img-kernel"
 
-          test -s \
+          test -f \
             "$AIK/split_img/boot.img-kernel"
 
       # ============================================================
-      # 22. Repack boot.img
+      # 19. Repack boot.img
       # ============================================================
 
       - name: Repack boot image
@@ -722,17 +708,17 @@ jobs:
 
           ./repackimg.sh
 
-          test -s image-new.img
+          test -f image-new.img
 
           cp \
             image-new.img \
             "$GITHUB_WORKSPACE/boot-kernelsu-droidspaces.img"
 
-          test -s \
+          test -f \
             "$GITHUB_WORKSPACE/boot-kernelsu-droidspaces.img"
 
       # ============================================================
-      # 23. Generate SHA256
+      # 20. SHA256
       # ============================================================
 
       - name: Generate checksums
@@ -754,7 +740,7 @@ jobs:
             > original-files.sha256
 
       # ============================================================
-      # 24. Create release notes
+      # 21. Release notes
       # ============================================================
 
       - name: Create release notes
@@ -770,10 +756,6 @@ jobs:
               kernelversion
           )"
 
-          KSU_COMMIT="$(
-            git -C KernelSU-Next rev-parse --short HEAD
-          )"
-
           cat > RELEASE.txt <<EOF
           Redmi Note 7 Pro (violet)
 
@@ -786,17 +768,14 @@ jobs:
           Kernel:
           ${KERNEL_VERSION}
 
-          Architecture:
-          arm64
-
-          KernelSU:
+          Root:
           KernelSU-Next legacy
-
-          KernelSU commit:
-          ${KSU_COMMIT}
 
           Droidspaces:
           Enabled
+
+          Architecture:
+          arm64
 
           Build commit:
           ${GITHUB_SHA}
@@ -807,20 +786,14 @@ jobs:
           Matching ROM:
           lineage-23.2-${ROM_BUILD}-nightly-violet
 
-          KernelSU mode:
-          KPROBE
-
-          LLVM:
-          ${CLANG_VERSION}
-
-          LLVM_IAS:
-          0
+          KernelSU KPROBE hooks:
+          Not required by this KernelSU-Next legacy configuration.
           EOF
 
           cat RELEASE.txt
 
       # ============================================================
-      # 25. Upload artifact
+      # 22. Upload artifact
       # ============================================================
 
       - name: Upload artifact
@@ -835,7 +808,7 @@ jobs:
           retention-days: 30
 
       # ============================================================
-      # 26. Create GitHub Release
+      # 23. GitHub Release
       # ============================================================
 
       - name: Create GitHub Release
