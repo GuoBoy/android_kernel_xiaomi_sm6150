@@ -14,7 +14,6 @@ env:
   ARCH: arm64
   SUBARCH: arm64
 
-  # 根据你的内核源码实际 defconfig 调整，violet 常用为 vendor/sdmsteppe-perf_defconfig
   DEFCONFIG: vendor/sdmsteppe-perf_defconfig
 
   ROM_BUILD: "20260826"
@@ -55,6 +54,7 @@ jobs:
           key: violet-kernel-ccache-${{ runner.os }}-${{ hashFiles('Makefile', 'Kconfig', 'arch/**', 'drivers/**', 'fs/**', 'include/**', 'kernel/**', 'mm/**', 'net/**') }}
           restore-keys: |
             violet-kernel-ccache-${{ runner.os }}-
+
       - name: Configure ccache
         run: |
           mkdir -p "$HOME/.ccache"
@@ -68,6 +68,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/clang
           key: android-clang-${{ env.CLANG_VERSION }}-ubuntu-22.04-v1
+
       - name: Download Clang if not cached
         if: steps.clang_cache.outputs.cache-hit != 'true'
         run: |
@@ -112,7 +113,7 @@ jobs:
           echo "OBJSIZE=llvm-size" >> "$GITHUB_ENV"
           echo "STRIP=llvm-strip" >> "$GITHUB_ENV"
           echo "LLVM=1" >> "$GITHUB_ENV"
-          echo "LLVM_IAS=1" >> "$GITHUB_ENV"          # 解决 as 不支持 -EL 问题
+          echo "LLVM_IAS=1" >> "$GITHUB_ENV"
           echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
 
@@ -128,10 +129,23 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
-          # 创建软链接（如果未自动创建）
           if [ ! -e KernelSU ]; then
             ln -sf KernelSU-0.9.5 KernelSU
           fi
+
+      # ============================================================
+      # 修复设备树编译错误 (tpdm_west)
+      # ============================================================
+      - name: Fix device tree compilation errors
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          # 查找所有包含 tpdm_west 的 .dtsi 文件并注释掉相关行
+          for file in arch/arm64/boot/dts/qcom/*.dtsi; do
+            if [ -f "$file" ] && grep -q tpdm_west "$file"; then
+              echo "Fixing $file"
+              sed -i 's/^.*tpdm_west.*$/\/\* & \*\//' "$file"
+            fi
+          done
 
       - name: Load defconfig
         run: |
@@ -142,14 +156,15 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE"
           CONFIG="$OUT/.config"
-          # 启用 KernelSU 所需选项 (使用 kprobe 方式，不启用 MANUAL_HOOK)
+
+          # 启用 KernelSU (使用 kprobe 方式)
           ./scripts/config --file "$CONFIG" \
             --enable KPROBES \
             --enable KPROBE_EVENTS \
             --enable KSU \
             --disable KSU_MANUAL_HOOK
 
-          # 启用 Droidspaces 所需全部选项
+          # 启用 Droidspaces
           ./scripts/config --file "$CONFIG" \
             --enable SYSCTL \
             --enable SYSVIPC \
@@ -199,15 +214,15 @@ jobs:
             --enable IP_ADVANCED_ROUTER \
             --enable IP_MULTIPLE_TABLES
 
-          # 禁用 Android 网络隔离（兼容性）
+          # 禁用 Android 网络隔离
           ./scripts/config --file "$CONFIG" --disable ANDROID_PARANOID_NETWORK || true
 
-          # 禁用栈保护（Clang 兼容性）
+          # 禁用栈保护 (Clang 兼容性)
           ./scripts/config --file "$CONFIG" \
             --disable CC_STACKPROTECTOR_STRONG \
             --enable CC_STACKPROTECTOR_NONE
 
-          # 禁用 bpfilter（避免链接警告）
+          # 禁用 bpfilter (避免链接警告)
           ./scripts/config --file "$CONFIG" --disable BPFILTER || true
 
           # 重新生成配置
